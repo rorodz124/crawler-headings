@@ -1,36 +1,24 @@
 import os
 from dataclasses import dataclass, field
 
-
-START_URL = "https://cm-barrancos.pt/municipio"
+START_URL = "https://cm-alcobaca.pt/"
+#START_URL = "https://cm-barrancos.pt/municipio"
 CRAWLER_WORKERS = min(os.cpu_count() or 4, 4)
-DEFAULT_MAX_PAGES = 200
-DEFAULT_TIMEOUT_MS = 30_000
-SETTLE_DELAY_MS = 750
+DEFAULT_MAX_PAGES = 120
+DEFAULT_TIMEOUT_MS = 40_000
+NETWORKIDLE_TIMEOUT_MS = 5_000
+SETTLE_DELAY_MS = 350
+EXTRA_WAIT_FOR_HEADINGS_MS = 800
+TARGET_PAGE_SECONDS = 0.5
 INCLUDE_SUBDOMAINS = False
 VALIDATE_VISIBLE_ONLY = True
 WRITE_JSON_REPORT = True
 REPORT_DIR = "relatorios"
 
 IGNORED_SCHEMES = ("mailto:", "tel:", "javascript:", "data:")
-IGNORED_EXTENSIONS = {
-    ".pdf",
-    ".doc",
-    ".docx",
-    ".xls",
-    ".xlsx",
-    ".zip",
-    ".rar",
-    ".exe",
-    ".ppt",
-    ".pptx",
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".gif",
-    ".webp",
-    ".svg",
-}
+IGNORED_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".zip", ".rar", ".exe",
+                    ".ppt", ".pptx", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg",}
+
 TRACKING_PARAMS_PREFIXES = ("utm_",)
 TRACKING_PARAMS_EXACT = {"fbclid", "gclid", "mc_cid", "mc_eid"}
 
@@ -40,7 +28,9 @@ class CrawlConfig:
     max_pages: int = DEFAULT_MAX_PAGES
     crawler_workers: int = CRAWLER_WORKERS
     timeout_ms: int = DEFAULT_TIMEOUT_MS
+    networkidle_timeout_ms: int = NETWORKIDLE_TIMEOUT_MS
     settle_delay_ms: int = SETTLE_DELAY_MS
+    extra_wait_for_headings_ms: int = EXTRA_WAIT_FOR_HEADINGS_MS
     include_subdomains: bool = INCLUDE_SUBDOMAINS
     user_agent: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
