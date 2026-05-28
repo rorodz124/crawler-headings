@@ -1,26 +1,28 @@
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-START_URL = "https://cm-alcobaca.pt/"
-#START_URL = "https://cm-barrancos.pt/municipio"
+# URL de arranque usada quando não é passado argumento na linha de comandos.
+# Deixar vazio para forçar sempre o utilizador a passar a URL explicitamente.
+START_URL = "https://www.mcr.pt/"
 CRAWLER_WORKERS = min(os.cpu_count() or 4, 4)
-DEFAULT_MAX_PAGES = 120
+DEFAULT_MAX_PAGES = 400
 DEFAULT_TIMEOUT_MS = 40_000
 NETWORKIDLE_TIMEOUT_MS = 5_000
 SETTLE_DELAY_MS = 350
 EXTRA_WAIT_FOR_HEADINGS_MS = 800
-TARGET_PAGE_SECONDS = 0.5
 INCLUDE_SUBDOMAINS = False
 VALIDATE_VISIBLE_ONLY = True
 WRITE_JSON_REPORT = True
 REPORT_DIR = "relatorios"
 
 IGNORED_SCHEMES = ("mailto:", "tel:", "javascript:", "data:")
-IGNORED_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".zip", ".rar", ".exe",
-                    ".ppt", ".pptx", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg",}
+IGNORED_EXTENSIONS = {
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".zip", ".rar", ".exe",
+    ".ppt", ".pptx", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg",
+}
 
 TRACKING_PARAMS_PREFIXES = ("utm_",)
-TRACKING_PARAMS_EXACT = {"fbclid", "gclid", "mc_cid", "mc_eid"}
+TRACKING_PARAMS_EXACT = {"fbclid", "gclid", "mc_cid", "mc_eid", "lang", "device"}
 
 
 @dataclass(frozen=True)
@@ -47,4 +49,4 @@ class AuditConfig:
     ignore_hidden_in_report: bool = False
     empty_text_tokens: tuple[str, ...] = ("\xa0",)
     strip_chars: str = " \t\r\n"
-    report_dir: str = field(default=REPORT_DIR)
+    report_dir: str = REPORT_DIR
