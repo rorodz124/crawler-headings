@@ -1,4 +1,3 @@
-# Flask backend for the Headings Validation Crawler UI
 import os
 import re
 import threading
@@ -11,18 +10,19 @@ from pathlib import Path
 from flask import Flask, abort, jsonify, request, send_file
 from flask_cors import CORS
 
+import db
 from config import AuditConfig, CrawlConfig
 from crawler import crawl_site
 from reporting import write_json_report
 
 BASE_DIR = Path(__file__).resolve().parent
-UI_FILE = BASE_DIR / "headings_app.html"
-JS_FILE = BASE_DIR / "headings_app.js"
+UI_FILE  = BASE_DIR / "headings_app.html"
+JS_FILE  = BASE_DIR / "headings_app.js"
 REPORTS_DIR = BASE_DIR / "relatorios_headings"
 
 MAX_JOBS = 20
 MAX_LOGS = 120
-WORKERS = 4 
+WORKERS  = 4
 
 app = Flask(__name__)
 CORS(app)
@@ -34,20 +34,20 @@ class JobManager:
         self._lock = threading.Lock()
 
     def _snapshot(self, job):
-        # Returns a plain-dict copy safe to serialise to JSON
         return {
-            "id":                  job["id"],
-            "type":                job["type"],
-            "title":               job["title"],
-            "state":               job["state"],
-            "created_at":          job["created_at"],
-            "started_at":          job.get("started_at"),
-            "finished_at":         job.get("finished_at"),
-            "cancel_requested":    job["cancel_requested"],
-            "progress":            dict(job["progress"]),
-            "logs":                list(job["logs"]),
-            "result":              job.get("result"),
-            "error":               job.get("error"),
+            "id":               job["id"],
+            "type":             job["type"],
+            "title":            job["title"],
+            "state":            job["state"],
+            "created_at":       job["created_at"],
+            "started_at":       job.get("started_at"),
+            "finished_at":      job.get("finished_at"),
+            "cancel_requested": job["cancel_requested"],
+            "progress":         dict(job["progress"]),
+            "logs":             list(job["logs"]),
+            "result":           job.get("result"),
+            "error":            job.get("error"),
+            "run_id":           job.get("run_id"),
         }
 
     def create(self, job_type, title):
@@ -65,6 +65,7 @@ class JobManager:
             "logs":             deque(maxlen=MAX_LOGS),
             "result":           None,
             "error":            None,
+            "run_id":           None,
         }
         with self._lock:
             active = sum(1 for j in self._jobs.values() if j["state"] in {"pendente", "a_correr"})
@@ -97,9 +98,9 @@ class JobManager:
             j["cancel_requested"] = True
             j["logs"].append("Cancelamento pedido pelo utilizador.")
             if j["state"] == "pendente":
-                j["state"] = "cancelada"
+                j["state"]       = "cancelada"
                 j["finished_at"] = datetime.utcnow().isoformat() + "Z"
-                j["progress"] = {
+                j["progress"]    = {
                     "phase":      "cancelada",
                     "message":    "Tarefa cancelada antes de arrancar.",
                     "percentage": j["progress"].get("percentage", 0),
@@ -107,7 +108,6 @@ class JobManager:
             return self._snapshot(j)
 
     def _mark_running(self, job_id):
-        # Returns False if cancellation was already requested
         with self._lock:
             j = self._jobs[job_id]
             if j["cancel_requested"] or j["state"] == "cancelada":
@@ -137,12 +137,13 @@ class JobManager:
             if payload.get("message"):
                 j["logs"].append(payload["message"])
 
-    def mark_done(self, job_id, result):
+    def mark_done(self, job_id, result, run_id=None):
         with self._lock:
             j = self._jobs[job_id]
             j["state"]       = "concluida"
             j["finished_at"] = datetime.utcnow().isoformat() + "Z"
             j["result"]      = result
+            j["run_id"]      = run_id
             j["progress"]    = {**j["progress"], "phase": "concluida", "message": "Auditoria concluída.", "percentage": 100}
             j["logs"].append("Auditoria concluída.")
 
@@ -156,15 +157,16 @@ class JobManager:
             j["progress"]    = {**j["progress"], "phase": state, "message": error}
             j["logs"].append(error)
 
+
 job_manager = JobManager()
+
 
 def _error_response(msg, status=400):
     return jsonify({"error": msg}), status
 
 
 def _resolve_report_path(name):
-    # Guards against path traversal and non-HTML files
-    base = REPORTS_DIR.resolve()
+    base   = REPORTS_DIR.resolve()
     target = (REPORTS_DIR / name).resolve()
     if not str(target).startswith(str(base) + os.sep) or target.suffix.lower() != ".html":
         abort(404)
@@ -172,7 +174,6 @@ def _resolve_report_path(name):
 
 
 def _launch_job(job_type, title, runner):
-    # Creates the job record and starts the worker thread
     job    = job_manager.create(job_type, title)
     job_id = job["id"]
 
@@ -181,7 +182,6 @@ def _launch_job(job_type, title, runner):
             return
 
         def on_progress(current, total, url, issue_count, timings):
-            # Matches the crawler's on_progress callback signature
             job_manager.update_progress(job_id, {
                 "phase":   "analise",
                 "message": f"[{current}/{total}] {url} — {issue_count} problema(s)",
@@ -194,11 +194,11 @@ def _launch_job(job_type, title, runner):
             return bool(j and j["cancel_requested"])
 
         try:
-            result = runner(on_progress, should_cancel)
+            result, run_id = runner(on_progress, should_cancel)
             if should_cancel():
                 job_manager.mark_failed(job_id, "Tarefa cancelada pelo utilizador.")
             else:
-                job_manager.mark_done(job_id, result)
+                job_manager.mark_done(job_id, result, run_id=run_id)
         except Exception as exc:
             if should_cancel():
                 job_manager.mark_failed(job_id, "Tarefa cancelada pelo utilizador.")
@@ -211,7 +211,6 @@ def _launch_job(job_type, title, runner):
 
 
 def _job_response(factory):
-    # Wraps job creation; returns 202 on success or 400 on validation error
     try:
         job = factory()
     except ValueError as exc:
@@ -219,8 +218,8 @@ def _job_response(factory):
     return jsonify(job), 202
 
 
-def _run_audit(url, max_pages, on_progress, should_cancel):
-    # Runs crawl_site with the configured settings and returns the result dict
+def _run_audit(tipo, url, max_pages, on_progress, should_cancel):
+    """Runs crawl_site, persists to DB, returns (result, run_id)."""
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     crawl_config = CrawlConfig(
         max_pages=max_pages if max_pages > 0 else 200,
@@ -230,15 +229,27 @@ def _run_audit(url, max_pages, on_progress, should_cancel):
         validate_visible_only=True,
         report_dir=str(REPORTS_DIR),
     )
+    iniciado_em = datetime.utcnow().isoformat() + "Z"
     result = crawl_site(url, crawl_config, audit_config, on_progress=on_progress)
+
     try:
         write_json_report(result, str(REPORTS_DIR))
     except Exception:
         pass
-    return result
+
+    run_id = None
+    try:
+        run_id = db.guardar_run(tipo=tipo, url=url, resultado=result, iniciado_em=iniciado_em)
+    except Exception as exc:
+        print(f"[DB] Não foi possível guardar histórico: {exc}")
+
+    return result, run_id
 
 
-# Static file endpoints
+# ---------------------------------------------------------------------------
+# Static files
+# ---------------------------------------------------------------------------
+
 @app.get("/")
 def index():
     return send_file(UI_FILE)
@@ -249,7 +260,10 @@ def serve_js():
     return send_file(JS_FILE, mimetype="application/javascript; charset=utf-8")
 
 
-# Report file endpoints
+# ---------------------------------------------------------------------------
+# HTML report file endpoints
+# ---------------------------------------------------------------------------
+
 @app.get("/relatorios/<path:name>")
 def open_report(name):
     target = _resolve_report_path(name)
@@ -317,7 +331,51 @@ def delete_report(name):
     return jsonify({"deleted": name})
 
 
+# ---------------------------------------------------------------------------
+# History (DB) endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/historico")
+def list_historico():
+    """Returns the list of past runs stored in the DB."""
+    try:
+        limite = min(int(request.args.get("limite", 100)), 500)
+        runs   = db.listar_runs(limite=limite)
+        return jsonify({"runs": runs})
+    except Exception as exc:
+        return _error_response(str(exc), 500)
+
+
+@app.get("/api/historico/<run_id>")
+def get_historico(run_id):
+    """Returns full detail of a run: pages + issues."""
+    run = db.obter_run(run_id)
+    if not run:
+        return _error_response("Run não encontrada.", 404)
+    return jsonify(run)
+
+
+@app.delete("/api/historico/<run_id>")
+def delete_historico(run_id):
+    """Deletes a single run and all associated data."""
+    run = db.obter_run(run_id)
+    if not run:
+        return _error_response("Run não encontrada.", 404)
+    db.apagar_run(run_id)
+    return jsonify({"deleted": run_id})
+
+
+@app.delete("/api/historico")
+def delete_all_historico():
+    """Deletes the entire history."""
+    db.apagar_todos_runs()
+    return jsonify({"deleted": "all"})
+
+
+# ---------------------------------------------------------------------------
 # Health and job endpoints
+# ---------------------------------------------------------------------------
+
 @app.get("/api/health")
 def health():
     return jsonify({"ok": True})
@@ -351,7 +409,10 @@ def cancel_job(job_id):
     return jsonify(job)
 
 
+# ---------------------------------------------------------------------------
 # Audit job creation endpoints
+# ---------------------------------------------------------------------------
+
 @app.post("/api/jobs/headings/pagina")
 def create_page_job():
     data = request.get_json(silent=True) or {}
@@ -360,7 +421,7 @@ def create_page_job():
         return _error_response("Indica a URL da página.")
     return _job_response(lambda: _launch_job(
         "pagina", f"Página: {url}",
-        lambda p, sc: _run_audit(url, max_pages=1, on_progress=p, should_cancel=sc),
+        lambda p, sc: _run_audit("pagina", url, max_pages=1, on_progress=p, should_cancel=sc),
     ))
 
 
@@ -373,10 +434,11 @@ def create_site_job():
         return _error_response("Indica a URL base do site.")
     return _job_response(lambda: _launch_job(
         "site", f"Site: {url}",
-        lambda p, sc: _run_audit(url, max_pages=max_pages, on_progress=p, should_cancel=sc),
+        lambda p, sc: _run_audit("site", url, max_pages=max_pages, on_progress=p, should_cancel=sc),
     ))
+
 
 if __name__ == "__main__":
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"[headings] Running at http://localhost:5001")
+    print("[headings] Running at http://localhost:5001")
     app.run(debug=False, port=5001, threaded=True)

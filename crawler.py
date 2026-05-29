@@ -28,7 +28,6 @@ EXTRACT_LINKS_SCRIPT = """
 }
 """
 
-
 def should_ignore_url(url: str) -> bool:
     if not url:
         return True
