@@ -88,6 +88,9 @@ def new_page(browser, crawl_config: CrawlConfig):
 
 def load_page(page, url: str, crawl_config: CrawlConfig) -> None:
     headings_selector = "h1, h2, h3, h4, h5, h6"
+    # Primeira tentativa: networkidle com timeout curto.
+    # Se falhar (timeout ou redirect interrompido), tenta domcontentloaded.
+    # Se também falhar, tenta commit (garante pelo menos que a resposta chegou).
     try:
         page.goto(
             url,
@@ -95,16 +98,20 @@ def load_page(page, url: str, crawl_config: CrawlConfig) -> None:
             wait_until="networkidle",
         )
     except Exception:
-        page.goto(url, timeout=max(crawl_config.timeout_ms // 2, 10_000), wait_until="domcontentloaded")
+        try:
+            page.goto(url, timeout=max(crawl_config.timeout_ms // 2, 10_000), wait_until="domcontentloaded")
+        except Exception:
+            page.goto(url, timeout=max(crawl_config.timeout_ms // 2, 10_000), wait_until="commit")
 
+    # Se já há headings, está pronto.
     if page.locator(headings_selector).count() > 0:
-        if crawl_config.settle_delay_ms > 0:
-            page.wait_for_timeout(crawl_config.settle_delay_ms)
         return
 
-    page.wait_for_timeout(crawl_config.extra_wait_for_headings_ms)
-    if page.locator(headings_selector).count() == 0 and crawl_config.settle_delay_ms > 0:
-        page.wait_for_timeout(crawl_config.settle_delay_ms)
+    # Headings ainda não visíveis — espera até aparecerem ou até ao timeout.
+    try:
+        page.wait_for_selector(headings_selector, timeout=crawl_config.extra_wait_for_headings_ms)
+    except Exception:
+        pass
 
 
 def extract_links(page, current_url: str, base_netloc: str, crawl_config: CrawlConfig) -> set[str]:

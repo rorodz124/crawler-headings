@@ -1,15 +1,13 @@
 import os
 from dataclasses import dataclass
 
-# URL de arranque usada quando não é passado argumento na linha de comandos.
-# Deixar vazio para forçar sempre o utilizador a passar a URL explicitamente.
 START_URL = "https://www.mcr.pt/"
-CRAWLER_WORKERS = min(os.cpu_count() or 4, 4)
-DEFAULT_MAX_PAGES = 400
+CRAWLER_WORKERS = min(os.cpu_count() or 4, 6)
+DEFAULT_MAX_PAGES = 80
 DEFAULT_TIMEOUT_MS = 40_000
-NETWORKIDLE_TIMEOUT_MS = 5_000
-SETTLE_DELAY_MS = 350
-EXTRA_WAIT_FOR_HEADINGS_MS = 800
+NETWORKIDLE_TIMEOUT_MS = 2_500
+SETTLE_DELAY_MS = 0
+EXTRA_WAIT_FOR_HEADINGS_MS = 400
 INCLUDE_SUBDOMAINS = False
 VALIDATE_VISIBLE_ONLY = True
 WRITE_JSON_REPORT = True
@@ -19,11 +17,11 @@ IGNORED_SCHEMES = ("mailto:", "tel:", "javascript:", "data:")
 IGNORED_EXTENSIONS = {
     ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".zip", ".rar", ".exe",
     ".ppt", ".pptx", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg",
+    ".kmz", ".kml", ".mp3", ".mp4", ".avi", ".mov", ".wmv", ".csv", ".xml",
 }
 
 TRACKING_PARAMS_PREFIXES = ("utm_",)
 TRACKING_PARAMS_EXACT = {"fbclid", "gclid", "mc_cid", "mc_eid", "lang", "device"}
-
 
 @dataclass(frozen=True)
 class CrawlConfig:
@@ -39,8 +37,8 @@ class CrawlConfig:
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     )
-    blocked_resource_types: tuple[str, ...] = ("font", "media", "websocket", "manifest")
-
+    
+    blocked_resource_types: tuple[str, ...] = ("font", "image", "media", "websocket", "manifest")
 
 @dataclass(frozen=True)
 class AuditConfig:
