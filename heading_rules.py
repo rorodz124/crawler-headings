@@ -15,16 +15,25 @@ def validate_headings(page_data: dict, audit_config: AuditConfig) -> dict:
     normalized_headings = []
 
     for index, heading in enumerate(raw_headings, start=1):
+        text = normalize_heading_text(heading.get("text", ""), audit_config)
+        accessible_text = normalize_heading_text(
+            heading.get("accessibleText", "") or heading.get("text", ""),
+            audit_config,
+        )
         normalized = {
             "index": index,
             "tag": heading["tag"],
             "level": heading["level"],
-            "text": normalize_heading_text(heading.get("text", ""), audit_config),
+            "text": text or accessible_text,
+            "raw_text": text,
+            "accessible_text": accessible_text,
+            "has_image": heading.get("hasImage", False),
+            "image_texts": heading.get("imageTexts", []),
             "visible": heading.get("visible", False),
             "hiddenByAttr": heading.get("hiddenByAttr", False),
             "hiddenByStyle": heading.get("hiddenByStyle", False),
         }
-        normalized["is_empty"] = not normalized["text"]
+        normalized["is_empty"] = not accessible_text
         normalized_headings.append(normalized)
 
     considered = [

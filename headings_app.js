@@ -20,6 +20,7 @@ const reportsDeleteAllBtn = document.getElementById("reportsDeleteAllBtn");
 let crawlMode    = "single";
 let hiddenJobIds = new Set();
 let jobFilters   = {}; // per-job filter state: "all" | "errors"
+let jobShowAll   = {}; // per-job: whether to show all pages beyond PAGE_LIMIT
 let openPages    = {}; // per-job+page open/closed state
 
 // Escapes HTML special characters
@@ -172,10 +173,13 @@ function renderHeadingTree(report, filter) {
   return html;
 }
 
+const PAGE_LIMIT = 12;
+
 // Renders the list of pages for a finished job
 function renderPagesList(job, reports) {
-  const jobId  = job.id;
-  const filter = jobFilters[jobId] || "all";
+  const jobId     = job.id;
+  const filter    = jobFilters[jobId] || "all";
+  const showAll   = jobShowAll[jobId] || false;
 
   const filtered = filter === "errors" ? reports.filter(r => !r.valid) : reports;
 
@@ -185,7 +189,10 @@ function renderPagesList(job, reports) {
       : `<div style="padding:12px 0;font-size:12px;color:var(--muted);font-family:var(--mono)">Sem páginas para mostrar.</div>`;
   }
 
-  return filtered.map(r => {
+  const visible   = showAll ? filtered : filtered.slice(0, PAGE_LIMIT);
+  const remaining = filtered.length - visible.length;
+
+  const pagesHtml = visible.map(r => {
     const pageKey    = jobId + ":" + r.url;
     const isOpen     = openPages[pageKey] || false;
     const hasError   = !r.valid;
@@ -197,6 +204,7 @@ function renderPagesList(job, reports) {
         <div class="page-item-head" data-toggle-page="${esc(pageKey)}">
           <span class="page-chevron">▶</span>
           <span class="page-url" title="${esc(r.url)}">${esc(r.url)}</span>
+          <button class="copy-url-btn" data-copy-url="${esc(r.url)}" title="Copiar link" type="button">⎘</button>
           <span class="page-badge ${hasError ? "badge-err" : "badge-ok"}">
             ${hasError ? `⚠ ${issueCount} ${issueCount === 1 ? "erro" : "erros"}` : "✓ OK"}
           </span>
@@ -209,6 +217,14 @@ function renderPagesList(job, reports) {
         </div>
       </div>`;
   }).join("");
+
+  const moreHtml = remaining > 0
+    ? `<button class="show-all-btn" data-job-show-all="${esc(jobId)}" type="button">
+        Ver todas as páginas (mais ${remaining})
+       </button>`
+    : "";
+
+  return pagesHtml + moreHtml;
 }
 
 // Renders the body of a single job card
@@ -246,7 +262,12 @@ function renderJobBody(job) {
       </div>
     </div>`;
 
-  const filterRowHtml = `
+  const isSinglePage = pagesCrawled <= 1;
+
+  const filterRowHtml = isSinglePage ? `
+    <div class="pages-header">
+      <span class="pages-header-title">Página auditada</span>
+    </div>` : `
     <div class="pages-header">
       <span class="pages-header-title">Páginas auditadas</span>
       <div class="filter-row">
@@ -257,15 +278,7 @@ function renderJobBody(job) {
 
   const pagesHtml = renderPagesList(job, reports);
 
-  let timingHtml = "";
-  if (result.timings && result.timings.total_elapsed_seconds != null) {
-    timingHtml = `<div style="margin-top:10px;font-family:var(--mono);font-size:10px;color:var(--muted)">
-      Tempo total: ${result.timings.total_elapsed_seconds.toFixed(2)}s
-      · ${(result.timings.pages_per_second || 0).toFixed(2)} pág/s
-    </div>`;
-  }
-
-  return summaryHtml + filterRowHtml + pagesHtml + timingHtml;
+  return summaryHtml + filterRowHtml + pagesHtml;
 }
 
 // Renders all visible jobs into the jobs list
@@ -279,6 +292,8 @@ function renderJobs(allJobs) {
   jobsListEl.innerHTML = visible.map(job => {
     const progress  = job.progress || {};
     const pct       = progress.percentage ?? 0;
+    const hasTotal  = (progress.total || 0) > 0;
+    const progressLabel = hasTotal ? `${pct}%` : `${progress.current || 0} páginas`;
     const isDone    = ["concluida", "erro", "cancelada"].includes(job.state);
     const canCancel = ["pendente", "a_correr"].includes(job.state);
     const statusMsg = buildProgressMsg(job);
@@ -297,7 +312,7 @@ function renderJobs(allJobs) {
           </div>
         </div>
         <div class="progress-wrap">
-          <div class="progress-label">${pct}%</div>
+          <div class="progress-label">${esc(progressLabel)}</div>
           <div class="progress"><div style="width:${pct}%"></div></div>
         </div>
         <div class="job-body">
@@ -305,6 +320,32 @@ function renderJobs(allJobs) {
         </div>
       </article>`;
   }).join("");
+
+  // Copy URL button handlers
+  jobsListEl.querySelectorAll("[data-copy-url]").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      try {
+        await navigator.clipboard.writeText(btn.dataset.copyUrl);
+        showToast("Link copiado.");
+      } catch (_) { showToast("Não foi possível copiar.", true); }
+    });
+  });
+
+  // Show-all button handlers
+  jobsListEl.querySelectorAll("[data-job-show-all]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const jid = btn.dataset.jobShowAll;
+      jobShowAll[jid] = true;
+      const jobData = visible.find(j => j.id === jid);
+      if (!jobData) return;
+      const article = jobsListEl.querySelector(`[data-job-id="${CSS.escape(jid)}"]`);
+      if (!article) return;
+      const body = article.querySelector(".job-body");
+      if (body) body.innerHTML = renderJobBody(jobData);
+      attachInteractivity(article);
+    });
+  });
 
   // Cancel button handlers
   jobsListEl.querySelectorAll("[data-cancel]").forEach(btn => {
@@ -324,6 +365,7 @@ function renderJobs(allJobs) {
       try { await fetchJson(`/api/jobs/${jid}`, { method: "DELETE" }); } catch (_) {}
       hiddenJobIds.add(jid);
       delete jobFilters[jid];
+      delete jobShowAll[jid];
       const el = jobsListEl.querySelector(`[data-job-id="${CSS.escape(jid)}"]`);
       if (el) el.remove();
       if (!jobsListEl.querySelector(".job"))
@@ -376,14 +418,14 @@ function attachInteractivity(container) {
 function buildProgressMsg(job) {
   const p = job.progress || {};
   if (job.state === "concluida" && job.result) {
-    const r = job.result;
-    return `${r.pages_crawled || 0} páginas · ${r.pages_with_issues || 0} com erros`;
+    return "";
   }
   if (p.phase === "crawl" || p.phase === "analise") {
     const current = p.current || 0;
     const total   = p.total || 0;
-    if (total)   return `${current} / ${total} páginas`;
-    if (current) return `${current} páginas visitadas`;
+    const errorPages = p.pages_with_issues || 0;
+    if (total)   return `${errorPages} / ${total} páginas com problemas · ${current} / ${total} páginas analisadas`;
+    if (current) return `${errorPages} páginas com problemas · ${current} páginas visitadas`;
   }
   return p.message || "A aguardar...";
 }

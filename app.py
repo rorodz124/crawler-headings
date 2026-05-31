@@ -13,7 +13,7 @@ from flask_cors import CORS
 import db
 from config import AuditConfig, CrawlConfig
 from crawler import crawl_site
-from reporting import write_json_report
+from reporting import make_report_basename, write_html_report, write_json_report
 
 BASE_DIR = Path(__file__).resolve().parent
 UI_FILE  = BASE_DIR / "headings_app.html"
@@ -181,12 +181,23 @@ def _launch_job(job_type, title, runner):
         if not job_manager._mark_running(job_id):
             return
 
-        def on_progress(current, total, url, issue_count, timings):
+        def on_progress(current, total, url, issue_count, timings, pages_with_issues=0):
+            issue_pages_message = (
+                f"{pages_with_issues}/{total} páginas com problemas"
+                if total > 0
+                else f"{pages_with_issues} páginas com problemas"
+            )
+            progress_message = (
+                f"[{current}/{total}] {url} — {issue_count} problema(s) — {issue_pages_message}"
+                if total > 0
+                else f"[{current}] {url} — {issue_count} problema(s) — {issue_pages_message}"
+            )
             job_manager.update_progress(job_id, {
-                "phase":   "analise",
-                "message": f"[{current}/{total}] {url} — {issue_count} problema(s)",
-                "current": current,
-                "total":   total,
+                "phase":             "analise",
+                "message":           progress_message,
+                "current":           current,
+                "total":             total,
+                "pages_with_issues": pages_with_issues,
             })
 
         def should_cancel():
@@ -222,7 +233,7 @@ def _run_audit(tipo, url, max_pages, on_progress, should_cancel):
     """Runs crawl_site, persists to DB, returns (result, run_id)."""
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     crawl_config = CrawlConfig(
-        max_pages=max_pages if max_pages > 0 else 200,
+        max_pages=max_pages,
         crawler_workers=WORKERS,
     )
     audit_config = AuditConfig(
@@ -230,10 +241,21 @@ def _run_audit(tipo, url, max_pages, on_progress, should_cancel):
         report_dir=str(REPORTS_DIR),
     )
     iniciado_em = datetime.utcnow().isoformat() + "Z"
-    result = crawl_site(url, crawl_config, audit_config, on_progress=on_progress)
+    result = crawl_site(
+        url,
+        crawl_config,
+        audit_config,
+        on_progress=on_progress,
+        should_cancel=should_cancel,
+    )
+
+    if should_cancel():
+        return result, None
 
     try:
-        write_json_report(result, str(REPORTS_DIR))
+        report_basename = make_report_basename(result)
+        write_html_report(result, str(REPORTS_DIR), basename=report_basename)
+        write_json_report(result, str(REPORTS_DIR), basename=report_basename)
     except Exception:
         pass
 
@@ -296,8 +318,16 @@ def delete_all_reports():
     deleted = 0
     for f in REPORTS_DIR.glob("*.html"):
         try:
+            json_pair = f.with_suffix(".json")
             f.unlink()
             deleted += 1
+            if json_pair.is_file():
+                json_pair.unlink()
+        except OSError:
+            pass
+    for f in REPORTS_DIR.glob("*.json"):
+        try:
+            f.unlink()
         except OSError:
             pass
     return jsonify({"deleted": deleted})
@@ -318,7 +348,11 @@ def rename_report(name):
     dest = REPORTS_DIR / new_name
     if dest.exists() and dest.resolve() != target.resolve():
         return _error_response("Já existe um relatório com esse nome.", 409)
+    json_pair = target.with_suffix(".json")
+    json_dest = dest.with_suffix(".json")
     target.rename(dest)
+    if json_pair.is_file() and not json_dest.exists():
+        json_pair.rename(json_dest)
     return jsonify({"name": new_name, "url": f"/relatorios/{new_name}"})
 
 
@@ -327,7 +361,10 @@ def delete_report(name):
     target = _resolve_report_path(name)
     if not target.is_file():
         abort(404)
+    json_pair = target.with_suffix(".json")
     target.unlink()
+    if json_pair.is_file():
+        json_pair.unlink()
     return jsonify({"deleted": name})
 
 

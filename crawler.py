@@ -127,10 +127,18 @@ def extract_links(page, current_url: str, base_netloc: str, crawl_config: CrawlC
     return links
 
 
-def crawl_site(url_base: str, crawl_config: CrawlConfig, audit_config: AuditConfig, on_progress=None) -> dict:
+def crawl_site(
+    url_base: str,
+    crawl_config: CrawlConfig,
+    audit_config: AuditConfig,
+    on_progress=None,
+    should_cancel=None,
+) -> dict:
     crawl_started_at = time.perf_counter()
     base_url = normalize_url(url_base)
     base_netloc = urlparse(base_url).netloc
+    should_cancel = should_cancel or (lambda: False)
+    has_page_limit = crawl_config.max_pages > 0
 
     queue = deque([base_url])
     queued = {base_url}
@@ -145,9 +153,31 @@ def crawl_site(url_base: str, crawl_config: CrawlConfig, audit_config: AuditConf
         "page_total_seconds": 0.0,
     }
 
-    state_lock = threading.Lock()
+    state_condition = threading.Condition()
     report_lock = threading.Lock()
     timing_lock = threading.Lock()
+
+    def take_next_url():
+        with state_condition:
+            while True:
+                reached_page_limit = (
+                    has_page_limit
+                    and len(visited) + len(in_progress) >= crawl_config.max_pages
+                )
+                if should_cancel() or reached_page_limit:
+                    return None
+
+                if queue:
+                    url = queue.popleft()
+                    if url in visited or url in in_progress:
+                        continue
+                    in_progress.add(url)
+                    return url
+
+                if not in_progress:
+                    return None
+
+                state_condition.wait(timeout=0.25)
 
     def worker():
         # Playwright sync API não permite partilhar objetos entre threads.
@@ -156,15 +186,17 @@ def crawl_site(url_base: str, crawl_config: CrawlConfig, audit_config: AuditConf
             page = new_page(browser, crawl_config)
             try:
                 while True:
-                    with state_lock:
-                        if not queue or len(visited) + len(in_progress) >= crawl_config.max_pages:
-                            break
-                        url = queue.popleft()
-                        if url in visited or url in in_progress:
-                            continue
-                        in_progress.add(url)
+                    url = take_next_url()
+                    if url is None:
+                        break
 
                     try:
+                        if should_cancel():
+                            with state_condition:
+                                in_progress.discard(url)
+                                state_condition.notify_all()
+                            break
+
                         page_started_at = time.perf_counter()
 
                         load_started_at = time.perf_counter()
@@ -194,6 +226,7 @@ def crawl_site(url_base: str, crawl_config: CrawlConfig, audit_config: AuditConf
 
                         with report_lock:
                             reports.append(report)
+                            pages_with_issues = sum(1 for item in reports if not item["valid"])
                         with timing_lock:
                             timing_totals["load_seconds"] += load_seconds
                             timing_totals["headings_seconds"] += headings_seconds
@@ -201,14 +234,16 @@ def crawl_site(url_base: str, crawl_config: CrawlConfig, audit_config: AuditConf
                             timing_totals["links_seconds"] += links_seconds
                             timing_totals["page_total_seconds"] += page_total_seconds
 
-                        with state_lock:
+                        with state_condition:
                             in_progress.discard(url)
                             visited.add(url)
-                            for link in new_links:
-                                if link not in visited and link not in in_progress and link not in queued:
-                                    queue.append(link)
-                                    queued.add(link)
+                            if not should_cancel():
+                                for link in new_links:
+                                    if link not in visited and link not in in_progress and link not in queued:
+                                        queue.append(link)
+                                        queued.add(link)
                             current_count = len(visited)
+                            state_condition.notify_all()
 
                         if on_progress:
                             on_progress(
@@ -217,27 +252,41 @@ def crawl_site(url_base: str, crawl_config: CrawlConfig, audit_config: AuditConf
                                 report["url"],
                                 report["summary"]["issue_count"],
                                 report["timings"],
+                                pages_with_issues,
                             )
                     except Exception as exc:
-                        with state_lock:
+                        error_report = {
+                            "url": url,
+                            "title": "",
+                            "headings": [],
+                            "considered_headings": [],
+                            "issues": [{"rule": "page_error", "message": str(exc)}],
+                            "valid": False,
+                            "summary": {
+                                "total_headings": 0,
+                                "considered_headings": 0,
+                                "h1_count": 0,
+                                "issue_count": 1,
+                            },
+                            "timings": {},
+                        }
+                        with state_condition:
                             in_progress.discard(url)
                             visited.add(url)
+                            current_count = len(visited)
+                            state_condition.notify_all()
                         with report_lock:
-                            reports.append({
-                                "url": url,
-                                "title": "",
-                                "headings": [],
-                                "considered_headings": [],
-                                "issues": [{"rule": "page_error", "message": str(exc)}],
-                                "valid": False,
-                                "summary": {
-                                    "total_headings": 0,
-                                    "considered_headings": 0,
-                                    "h1_count": 0,
-                                    "issue_count": 1,
-                                },
-                                "timings": {},
-                            })
+                            reports.append(error_report)
+                            pages_with_issues = sum(1 for item in reports if not item["valid"])
+                        if on_progress:
+                            on_progress(
+                                current_count,
+                                crawl_config.max_pages,
+                                url,
+                                1,
+                                {},
+                                pages_with_issues,
+                            )
             finally:
                 page.context.close()
 
