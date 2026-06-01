@@ -103,6 +103,8 @@
     .progress-label{font-family:var(--mono);font-size:10px;color:var(--muted);margin-bottom:5px;letter-spacing:.04em}
     .progress{height:4px;background:var(--border);border-radius:999px;overflow:hidden;margin-bottom:14px}
     .progress>div{height:100%;width:0;background:var(--accent);transition:width .3s ease;border-radius:999px}
+    @keyframes progress-indeterminate{0%{transform:translateX(-100%)}100%{transform:translateX(400%)}}
+    .progress.indeterminate>div{width:25%!important;animation:progress-indeterminate 1.4s ease-in-out infinite;border-radius:999px}
 
     .job-body{padding:0 16px 16px}
 

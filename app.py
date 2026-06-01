@@ -22,7 +22,7 @@ REPORTS_DIR = BASE_DIR / "relatorios_headings"
 
 MAX_JOBS = 20
 MAX_LOGS = 120
-WORKERS  = 4
+WORKERS  = 6
 
 app = Flask(__name__)
 CORS(app)
@@ -181,23 +181,25 @@ def _launch_job(job_type, title, runner):
         if not job_manager._mark_running(job_id):
             return
 
-        def on_progress(current, total, url, issue_count, timings, pages_with_issues=0):
-            issue_pages_message = (
-                f"{pages_with_issues}/{total} páginas com problemas"
-                if total > 0
-                else f"{pages_with_issues} páginas com problemas"
-            )
+        partial_reports_with_errors = []
+
+        def on_progress(current, total, url, issue_count, timings, pages_with_issues=0, *args, **kwargs):
             progress_message = (
-                f"[{current}/{total}] {url} — {issue_count} problema(s) — {issue_pages_message}"
+                f"[{current}/{total}] {url} — {issue_count} problema(s)"
                 if total > 0
-                else f"[{current}] {url} — {issue_count} problema(s) — {issue_pages_message}"
+                else f"[{current}] {url} — {issue_count} problema(s)"
             )
+            report = kwargs.get("report")
+            if report and not report.get("valid") and report.get("issues"):
+                partial_reports_with_errors.append(report)
+
             job_manager.update_progress(job_id, {
                 "phase":             "analise",
                 "message":           progress_message,
                 "current":           current,
                 "total":             total,
                 "pages_with_issues": pages_with_issues,
+                "partial_reports_with_errors": list(partial_reports_with_errors),
             })
 
         def should_cancel():
@@ -232,9 +234,11 @@ def _job_response(factory):
 def _run_audit(tipo, url, max_pages, on_progress, should_cancel):
     """Runs crawl_site, persists to DB, returns (result, run_id)."""
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    # Página única não beneficia de workers paralelos — 1 basta e poupa recursos.
+    effective_workers = 1 if max_pages == 1 else WORKERS
     crawl_config = CrawlConfig(
         max_pages=max_pages,
-        crawler_workers=WORKERS,
+        crawler_workers=effective_workers,
     )
     audit_config = AuditConfig(
         validate_visible_only=True,
@@ -252,12 +256,13 @@ def _run_audit(tipo, url, max_pages, on_progress, should_cancel):
     if should_cancel():
         return result, None
 
-    try:
-        report_basename = make_report_basename(result)
-        write_html_report(result, str(REPORTS_DIR), basename=report_basename)
-        write_json_report(result, str(REPORTS_DIR), basename=report_basename)
-    except Exception:
-        pass
+    if max_pages != 1:
+        try:
+            report_basename = make_report_basename(result)
+            write_html_report(result, str(REPORTS_DIR), basename=report_basename)
+            write_json_report(result, str(REPORTS_DIR), basename=report_basename)
+        except Exception:
+            pass
 
     run_id = None
     try:

@@ -236,7 +236,17 @@ function renderJobBody(job) {
       return `<div class="page-error-msg">${esc(job.error || "Erro desconhecido.")}</div>`;
     }
     const progress = job.progress || {};
-    return `<div style="font-size:12px;color:var(--muted);font-family:var(--mono);padding:4px 0">${esc(progress.message || "A aguardar...")}</div>`;
+    const partialReports = progress.partial_reports_with_errors || [];
+    let html = `<div style="font-size:12px;color:var(--muted);font-family:var(--mono);padding:4px 0">${esc(progress.message || "A aguardar...")}</div>`;
+    if (job.state === "a_correr" && partialReports.length > 0) {
+      html += `
+        <div class="pages-header" style="margin-top: 12px; margin-bottom: 6px;">
+          <span class="pages-header-title">Erros encontrados até agora</span>
+        </div>
+        ${renderPagesList(job, partialReports)}
+      `;
+    }
+    return html;
   }
 
   const reports         = result.reports || [];
@@ -293,6 +303,8 @@ function renderJobs(allJobs) {
     const progress  = job.progress || {};
     const pct       = progress.percentage ?? 0;
     const hasTotal  = (progress.total || 0) > 0;
+    const isRunning = job.state === "a_correr";
+    const isIndeterminate = isRunning && !hasTotal;
     const progressLabel = hasTotal ? `${pct}%` : `${progress.current || 0} páginas`;
     const isDone    = ["concluida", "erro", "cancelada"].includes(job.state);
     const canCancel = ["pendente", "a_correr"].includes(job.state);
@@ -313,7 +325,7 @@ function renderJobs(allJobs) {
         </div>
         <div class="progress-wrap">
           <div class="progress-label">${esc(progressLabel)}</div>
-          <div class="progress"><div style="width:${pct}%"></div></div>
+          <div class="progress${isIndeterminate ? " indeterminate" : ""}"><div style="width:${isIndeterminate ? 100 : pct}%"></div></div>
         </div>
         <div class="job-body">
           ${renderJobBody(job)}
@@ -421,11 +433,11 @@ function buildProgressMsg(job) {
     return "";
   }
   if (p.phase === "crawl" || p.phase === "analise") {
-    const current = p.current || 0;
-    const total   = p.total || 0;
+    const current    = p.current || 0;
+    const total      = p.total || 0;
     const errorPages = p.pages_with_issues || 0;
-    if (total)   return `${errorPages} / ${total} páginas com problemas · ${current} / ${total} páginas analisadas`;
-    if (current) return `${errorPages} páginas com problemas · ${current} páginas visitadas`;
+    if (total)   return `${current} / ${total} páginas visitadas · ${errorPages} páginas com problemas`;
+    if (current) return `${current} páginas visitadas · ${errorPages} páginas com problemas`;
   }
   return p.message || "A aguardar...";
 }

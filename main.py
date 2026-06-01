@@ -65,7 +65,7 @@ def main() -> None:
     result = crawl_site(args.url, crawl_config, audit_config, on_progress=on_progress)
     print_summary(result)
 
-    if WRITE_JSON_REPORT and not args.no_report:
+    if WRITE_JSON_REPORT and not args.no_report and mode != "single":
         output_path = write_json_report(result, audit_config.report_dir)
         print(f"Relatorio: {Path(output_path).resolve()}")
 

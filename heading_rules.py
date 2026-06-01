@@ -3,113 +3,114 @@ from __future__ import annotations
 from config import AuditConfig
 
 
-def normalize_heading_text(text: str, audit_config: AuditConfig) -> str:
-    value = text or ""
-    for token in audit_config.empty_text_tokens:
-        value = value.replace(token, " ")
-    return " ".join(value.strip(audit_config.strip_chars).split())
+def _is_empty(heading: dict) -> bool:
+    """Um heading está vazio se não tem texto E não tem nenhuma imagem."""
+    has_text = bool((heading.get("text") or "").strip())
+    has_image = heading.get("hasImage", False)
+    return not has_text and not has_image
 
 
 def validate_headings(page_data: dict, audit_config: AuditConfig) -> dict:
-    raw_headings = page_data.get("headings", [])
-    normalized_headings = []
+    raw = page_data.get("headings", [])
 
-    for index, heading in enumerate(raw_headings, start=1):
-        text = normalize_heading_text(heading.get("text", ""), audit_config)
-        accessible_text = normalize_heading_text(
-            heading.get("accessibleText", "") or heading.get("text", ""),
-            audit_config,
-        )
-        normalized = {
-            "index": index,
-            "tag": heading["tag"],
-            "level": heading["level"],
-            "text": text or accessible_text,
-            "raw_text": text,
-            "accessible_text": accessible_text,
-            "has_image": heading.get("hasImage", False),
-            "image_texts": heading.get("imageTexts", []),
-            "visible": heading.get("visible", False),
-            "hiddenByAttr": heading.get("hiddenByAttr", False),
-            "hiddenByStyle": heading.get("hiddenByStyle", False),
-        }
-        normalized["is_empty"] = not accessible_text
-        normalized_headings.append(normalized)
+    # Atribuir índice (posição na página, começa em 1) e normalizar texto.
+    headings = []
+    for i, h in enumerate(raw, start=1):
+        text = " ".join((h.get("text") or "").split())
+        headings.append({
+            "index":    i,
+            "tag":      h["tag"],
+            "level":    h["level"],
+            "text":     text,
+            "hasImage": h.get("hasImage", False),
+            "visible":  h.get("visible", False),
+            "is_empty": _is_empty({"text": text, "hasImage": h.get("hasImage", False)}),
+        })
 
+    # Apenas os headings visíveis entram nas regras (quando validate_visible_only=True).
     considered = [
-        heading
-        for heading in normalized_headings
-        if heading["visible"] or not audit_config.validate_visible_only
+        h for h in headings
+        if h["visible"] or not audit_config.validate_visible_only
     ]
 
     issues = []
-    h1_count = sum(1 for heading in considered if heading["level"] == 1)
 
-    if audit_config.require_single_h1:
-        if h1_count == 0:
-            issues.append(
-                {
-                    "rule": "single_h1",
-                    "message": "A página não contém nenhum h1 válido.",
-                }
-            )
-        elif h1_count > 1:
-            issues.append(
-                {
-                    "rule": "single_h1",
-                    "message": f"A página contém {h1_count} headings h1; deve existir apenas um.",
-                }
-            )
+    # ------------------------------------------------------------------
+    # Regra 2.1 — h1 único e não vazio
+    # ------------------------------------------------------------------
+    h1s = [h for h in considered if h["level"] == 1]
+    h1_count = len(h1s)
 
-    for heading in considered:
-        if heading["is_empty"]:
-            issues.append(
-                {
-                    "rule": "empty_heading",
-                    "message": f"{heading['tag']} vazio na posição {heading['index']}.",
-                    "heading_index": heading["index"],
-                }
-            )
+    if h1_count == 0:
+        issues.append({
+            "rule":    "missing_h1",
+            "message": "A página não contém nenhum h1.",
+        })
+    elif h1_count > 1:
+        issues.append({
+            "rule":    "multiple_h1",
+            "message": f"A página contém {h1_count} headings h1; deve existir apenas um.",
+        })
 
-    previous_level = None
-    for heading in considered:
-        current_level = heading["level"]
-        if previous_level is None:
-            if current_level > 1:
-                issues.append(
-                    {
-                        "rule": "starts_too_deep",
-                        "message": (
-                            f"A página começa a estrutura de headings com {heading['tag']}, "
-                            "sem níveis anteriores."
-                        ),
-                        "heading_index": heading["index"],
-                    }
-                )
-        elif current_level > previous_level + 1:
-            issues.append(
-                {
-                    "rule": "hierarchy_skip",
-                    "message": (
-                        f"Salto inválido de h{previous_level} para h{current_level} "
-                        f"na posição {heading['index']}."
+    for h in h1s:
+        if h["is_empty"]:
+            issues.append({
+                "rule":          "empty_h1",
+                "message":       f"O h1 na posição {h['index']} está vazio (sem texto nem imagem).",
+                "heading_index": h["index"],
+            })
+
+    # ------------------------------------------------------------------
+    # Regra 2.2 — hierarquia de títulos + headings vazios (todos os níveis)
+    # ------------------------------------------------------------------
+    prev_level = None
+    for h in considered:
+        level = h["level"]
+
+        # Heading vazio (qualquer nível, incluindo h1 já tratado acima)
+        if h["is_empty"] and level != 1:
+            issues.append({
+                "rule":          "empty_heading",
+                "message":       f"{h['tag']} vazio na posição {h['index']}.",
+                "heading_index": h["index"],
+            })
+
+        # Primeiro heading da página: não deve começar num nível demasiado profundo.
+        # Só faz sentido quando existe um h1 — se não há h1, o erro já foi reportado
+        # em missing_h1 e não duplicamos.
+        if prev_level is None:
+            if level > 1 and h1_count > 0:
+                issues.append({
+                    "rule":          "starts_too_deep",
+                    "message":       (
+                        f"A estrutura de headings começa em {h['tag']} "
+                        "sem níveis anteriores."
                     ),
-                    "heading_index": heading["index"],
-                }
-            )
-        previous_level = current_level
+                    "heading_index": h["index"],
+                })
+        elif level > prev_level + 1:
+            issues.append({
+                "rule":          "hierarchy_skip",
+                "message":       (
+                    f"Salto inválido de h{prev_level} para h{level} "
+                    f"na posição {h['index']}."
+                ),
+                "heading_index": h["index"],
+            })
+
+        prev_level = level
 
     return {
-        "url": page_data.get("url", ""),
-        "title": page_data.get("title", ""),
-        "headings": normalized_headings if not audit_config.ignore_hidden_in_report else considered,
-        "considered_headings": considered,
-        "issues": issues,
-        "valid": not issues,
+        "url":                  page_data.get("url", ""),
+        "title":                page_data.get("title", ""),
+        "headings":             headings if not audit_config.ignore_hidden_in_report else considered,
+        "considered_headings":  considered,
+        "issues":               issues,
+        "valid":                not issues,
         "summary": {
-            "total_headings": len(normalized_headings),
-            "considered_headings": len(considered),
-            "h1_count": h1_count,
-            "issue_count": len(issues),
+            "total_headings":       len(headings),
+            "considered_headings":  len(considered),
+            "h1_count":             h1_count,
+            "issue_count":          len(issues),
         },
     }

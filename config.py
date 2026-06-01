@@ -2,12 +2,12 @@ import os
 from dataclasses import dataclass
 
 START_URL = "https://www.mcr.pt/"
-CRAWLER_WORKERS = min(os.cpu_count() or 4, 6)
+CRAWLER_WORKERS = min(max((os.cpu_count() or 4) + 2, 4), 6)
 DEFAULT_MAX_PAGES = 80
-DEFAULT_TIMEOUT_MS = 80_000
-NETWORKIDLE_TIMEOUT_MS = 50_000
-SETTLE_DELAY_MS = 0
-EXTRA_WAIT_FOR_HEADINGS_MS = 400
+DEFAULT_TIMEOUT_MS = 15_000
+NETWORKIDLE_TIMEOUT_MS = 2_500
+SETTLE_DELAY_MS = 250
+EXTRA_WAIT_FOR_HEADINGS_MS = 1_200
 INCLUDE_SUBDOMAINS = False
 VALIDATE_VISIBLE_ONLY = True
 WRITE_JSON_REPORT = True
@@ -17,8 +17,16 @@ IGNORED_SCHEMES = ("mailto:", "tel:", "javascript:", "data:")
 IGNORED_EXTENSIONS = {
     ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".zip", ".rar", ".exe",
     ".ppt", ".pptx", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg",
-    ".kmz", ".kml", ".mp3", ".mp4", ".avi", ".mov", ".wmv", ".csv", ".xml",
+    ".ico", ".css", ".js", ".mjs", ".map", ".json", ".woff", ".woff2",
+    ".ttf", ".otf", ".eot", ".kmz", ".kml", ".mp3", ".mp4", ".avi",
+    ".mov", ".wmv", ".csv", ".xml",
 }
+
+IGNORED_PATH_PREFIXES = (
+    "/_next/",
+    "/assets/",
+    "/uploads/",
+)
 
 TRACKING_PARAMS_PREFIXES = ("utm_",)
 TRACKING_PARAMS_EXACT = {"fbclid", "gclid", "mc_cid", "mc_eid", "lang", "device"}

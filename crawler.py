@@ -4,12 +4,14 @@ import threading
 import time
 from collections import deque
 from contextlib import contextmanager
+import re
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from playwright.sync_api import sync_playwright
 
 from config import (
     IGNORED_EXTENSIONS,
+    IGNORED_PATH_PREFIXES,
     IGNORED_SCHEMES,
     TRACKING_PARAMS_EXACT,
     TRACKING_PARAMS_PREFIXES,
@@ -22,11 +24,26 @@ from heading_rules import validate_headings
 
 EXTRACT_LINKS_SCRIPT = """
 () => {
-  return Array.from(document.querySelectorAll("a[href]"), (link) => link.getAttribute("href") || "")
-    .map((href) => href.trim())
-    .filter(Boolean);
+  const values = [];
+  const add = (value) => {
+    if (typeof value === "string" && value.trim()) values.push(value.trim());
+  };
+
+  document.querySelectorAll("a[href], area[href], link[href]").forEach((node) => {
+    add(node.getAttribute("href"));
+  });
+
+  // Some Next.js/React sites keep route URLs inside streamed script JSON before
+  // they are materialized as anchors. Keep the raw HTML so Python can extract
+  // those URLs with the same normalization and domain checks as normal links.
+  add(document.documentElement.innerHTML || "");
+
+  return values;
 }
 """
+
+ABSOLUTE_URL_RE = re.compile(r"https?:\\?/\\?/[^\\\"'<>\s\])}]+", re.IGNORECASE)
+ROOT_PATH_RE = re.compile(r"""["'=(:]\s*(/(?!/|_next/|assets/|uploads/)[A-Za-z0-9][^\\\"'<>\s\])}]*)""")
 
 def should_ignore_url(url: str) -> bool:
     if not url:
@@ -34,7 +51,13 @@ def should_ignore_url(url: str) -> bool:
     lowered = url.lower()
     if lowered.startswith(IGNORED_SCHEMES):
         return True
-    return any(urlparse(lowered).path.endswith(ext) for ext in IGNORED_EXTENSIONS)
+    parsed = urlparse(lowered)
+    if any(parsed.path.startswith(prefix) for prefix in IGNORED_PATH_PREFIXES):
+        return True
+    filename = parsed.path.rsplit("/", 1)[-1]
+    if "." in filename:
+        return True
+    return any(parsed.path.endswith(ext) for ext in IGNORED_EXTENSIONS)
 
 
 def normalize_url(url: str) -> str:
@@ -52,11 +75,30 @@ def normalize_url(url: str) -> str:
 
 
 def same_domain(url: str, base_netloc: str, include_subdomains: bool) -> bool:
-    candidate = urlparse(url).netloc.lower()
-    base = base_netloc.lower()
+    candidate = canonical_netloc(urlparse(url).netloc)
+    base = canonical_netloc(base_netloc)
     if include_subdomains:
         return candidate == base or candidate.endswith("." + base)
     return candidate == base
+
+
+def canonical_netloc(netloc: str) -> str:
+    netloc = (netloc or "").lower()
+    return netloc[4:] if netloc.startswith("www.") else netloc
+
+
+def iter_candidate_hrefs(raw_value: str):
+    value = (raw_value or "").strip()
+    if not value:
+        return
+    if "<" not in value and len(value) <= 2048:
+        yield value
+    if "<" not in value and "http" not in value and "/" not in value:
+        return
+    for match in ABSOLUTE_URL_RE.finditer(value):
+        yield match.group(0).replace("\\/", "/")
+    for match in ROOT_PATH_RE.finditer(value):
+        yield match.group(1).replace("\\/", "/")
 
 
 @contextmanager
@@ -87,43 +129,44 @@ def new_page(browser, crawl_config: CrawlConfig):
 
 def load_page(page, url: str, crawl_config: CrawlConfig) -> None:
     headings_selector = "h1, h2, h3, h4, h5, h6"
-    # Primeira tentativa: networkidle com timeout curto.
-    # Se falhar (timeout ou redirect interrompido), tenta domcontentloaded.
-    # Se também falhar, tenta commit (garante pelo menos que a resposta chegou).
+    page.set_default_timeout(crawl_config.timeout_ms)
+    page.set_default_navigation_timeout(crawl_config.timeout_ms)
+    # Fast path: avoid waiting for analytics/API calls that keep networkidle busy.
     try:
-        page.goto(
-            url,
-            timeout=min(crawl_config.timeout_ms, crawl_config.networkidle_timeout_ms),
-            wait_until="networkidle",
-        )
+        page.goto(url, timeout=crawl_config.timeout_ms, wait_until="domcontentloaded")
     except Exception:
-        try:
-            page.goto(url, timeout=max(crawl_config.timeout_ms // 2, 10_000), wait_until="domcontentloaded")
-        except Exception:
-            page.goto(url, timeout=max(crawl_config.timeout_ms // 2, 10_000), wait_until="commit")
+        page.goto(url, timeout=crawl_config.timeout_ms, wait_until="commit")
+
+    if crawl_config.settle_delay_ms > 0:
+        page.wait_for_timeout(crawl_config.settle_delay_ms)
 
     # Se já há headings, está pronto.
     if page.locator(headings_selector).count() > 0:
         return
 
-    # Headings ainda não visíveis — espera até aparecerem ou até ao timeout.
+    # Give React/Next pages a bounded chance to paint headings after DOMContentLoaded.
     try:
         page.wait_for_selector(headings_selector, timeout=crawl_config.extra_wait_for_headings_ms)
+        return
     except Exception:
-        pass
+        try:
+            page.wait_for_load_state("networkidle", timeout=crawl_config.networkidle_timeout_ms)
+        except Exception:
+            pass
 
 
 def extract_links(page, current_url: str, base_netloc: str, crawl_config: CrawlConfig) -> set[str]:
     current_normalized = normalize_url(current_url)
     links = set()
-    for href in page.evaluate(EXTRACT_LINKS_SCRIPT):
-        absolute = normalize_url(urljoin(current_url, href))
-        if (
-            absolute != current_normalized
-            and not should_ignore_url(absolute)
-            and same_domain(absolute, base_netloc, crawl_config.include_subdomains)
-        ):
-            links.add(absolute)
+    for raw_value in page.evaluate(EXTRACT_LINKS_SCRIPT):
+        for href in iter_candidate_hrefs(raw_value):
+            absolute = normalize_url(urljoin(current_url, href))
+            if (
+                absolute != current_normalized
+                and not should_ignore_url(absolute)
+                and same_domain(absolute, base_netloc, crawl_config.include_subdomains)
+            ):
+                links.add(absolute)
     return links
 
 
@@ -253,6 +296,7 @@ def crawl_site(
                                 report["summary"]["issue_count"],
                                 report["timings"],
                                 pages_with_issues,
+                                report=report,
                             )
                     except Exception as exc:
                         error_report = {
@@ -286,6 +330,7 @@ def crawl_site(
                                 1,
                                 {},
                                 pages_with_issues,
+                                report=error_report,
                             )
             finally:
                 page.context.close()
