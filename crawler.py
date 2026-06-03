@@ -29,14 +29,13 @@ EXTRACT_LINKS_SCRIPT = """
     if (typeof value === "string" && value.trim()) values.push(value.trim());
   };
 
-  document.querySelectorAll("a[href], area[href], link[href]").forEach((node) => {
+  document.querySelectorAll("a[href], area[href]").forEach((node) => {
     add(node.getAttribute("href"));
   });
 
-  // Some Next.js/React sites keep route URLs inside streamed script JSON before
-  // they are materialized as anchors. Keep the raw HTML so Python can extract
-  // those URLs with the same normalization and domain checks as normal links.
-  add(document.documentElement.innerHTML || "");
+  document.querySelectorAll("link[href][rel~='canonical'], link[href][rel~='alternate'], link[href][rel~='next'], link[href][rel~='prev']").forEach((node) => {
+    add(node.getAttribute("href"));
+  });
 
   return values;
 }
@@ -62,16 +61,26 @@ def should_ignore_url(url: str) -> bool:
 
 def normalize_url(url: str) -> str:
     parsed = urlparse(url)
+    scheme = (parsed.scheme or "").lower()
+    netloc = (parsed.netloc or "").lower()
     filtered_qs = [
         (key, value)
         for key, value in parse_qsl(parsed.query, keep_blank_values=True)
         if key not in TRACKING_PARAMS_EXACT
         and not any(key.startswith(prefix) for prefix in TRACKING_PARAMS_PREFIXES)
     ]
+    filtered_qs.sort()
     path = parsed.path or "/"
     if path != "/":
         path = path.rstrip("/")
-    return urlunparse(parsed._replace(fragment="", query=urlencode(filtered_qs, doseq=True), path=path))
+    return urlunparse(parsed._replace(scheme=scheme, netloc=netloc, fragment="", query=urlencode(filtered_qs, doseq=True), path=path))
+
+
+def url_identity(url: str) -> str:
+    """Canonical key for dedupe without changing the URL that will be fetched."""
+    normalized = normalize_url(url)
+    parsed = urlparse(normalized)
+    return urlunparse(parsed._replace(netloc=canonical_netloc(parsed.netloc)))
 
 
 def same_domain(url: str, base_netloc: str, include_subdomains: bool) -> bool:
@@ -127,42 +136,51 @@ def new_page(browser, crawl_config: CrawlConfig):
     return page
 
 
-def load_page(page, url: str, crawl_config: CrawlConfig) -> None:
+def load_page(page, url: str, crawl_config: CrawlConfig):
     headings_selector = "h1, h2, h3, h4, h5, h6"
+    h1_selector = "h1"
     page.set_default_timeout(crawl_config.timeout_ms)
     page.set_default_navigation_timeout(crawl_config.timeout_ms)
     # Fast path: avoid waiting for analytics/API calls that keep networkidle busy.
     try:
-        page.goto(url, timeout=crawl_config.timeout_ms, wait_until="domcontentloaded")
+        response = page.goto(url, timeout=crawl_config.timeout_ms, wait_until="domcontentloaded")
     except Exception:
-        page.goto(url, timeout=crawl_config.timeout_ms, wait_until="commit")
+        response = page.goto(url, timeout=crawl_config.timeout_ms, wait_until="commit")
 
     if crawl_config.settle_delay_ms > 0:
         page.wait_for_timeout(crawl_config.settle_delay_ms)
 
-    # Se já há headings, está pronto.
-    if page.locator(headings_selector).count() > 0:
-        return
+    # Client-rendered pages can paint secondary headings before the main h1.
+    try:
+        page.wait_for_selector(h1_selector, timeout=crawl_config.extra_wait_for_headings_ms)
+    except Exception:
+        pass
 
-    # Give React/Next pages a bounded chance to paint headings after DOMContentLoaded.
+    # If there is no h1, still give the page a bounded chance to render headings.
     try:
         page.wait_for_selector(headings_selector, timeout=crawl_config.extra_wait_for_headings_ms)
-        return
     except Exception:
-        try:
-            page.wait_for_load_state("networkidle", timeout=crawl_config.networkidle_timeout_ms)
-        except Exception:
-            pass
+        pass
+
+    try:
+        page.wait_for_load_state("networkidle", timeout=crawl_config.networkidle_timeout_ms)
+    except Exception:
+        pass
+
+    if crawl_config.settle_delay_ms > 0:
+        page.wait_for_timeout(crawl_config.settle_delay_ms)
+
+    return response
 
 
 def extract_links(page, current_url: str, base_netloc: str, crawl_config: CrawlConfig) -> set[str]:
-    current_normalized = normalize_url(current_url)
+    current_identity = url_identity(current_url)
     links = set()
     for raw_value in page.evaluate(EXTRACT_LINKS_SCRIPT):
         for href in iter_candidate_hrefs(raw_value):
             absolute = normalize_url(urljoin(current_url, href))
             if (
-                absolute != current_normalized
+                url_identity(absolute) != current_identity
                 and not should_ignore_url(absolute)
                 and same_domain(absolute, base_netloc, crawl_config.include_subdomains)
             ):
@@ -184,7 +202,7 @@ def crawl_site(
     has_page_limit = crawl_config.max_pages > 0
 
     queue = deque([base_url])
-    queued = {base_url}
+    known_urls = {url_identity(base_url)}
     visited = set()
     in_progress = set()
     reports = []
@@ -212,9 +230,10 @@ def crawl_site(
 
                 if queue:
                     url = queue.popleft()
-                    if url in visited or url in in_progress:
+                    url_id = url_identity(url)
+                    if url_id in visited or url_id in in_progress:
                         continue
-                    in_progress.add(url)
+                    in_progress.add(url_id)
                     return url
 
                 if not in_progress:
@@ -236,18 +255,39 @@ def crawl_site(
                     try:
                         if should_cancel():
                             with state_condition:
-                                in_progress.discard(url)
+                                in_progress.discard(url_identity(url))
                                 state_condition.notify_all()
                             break
 
                         page_started_at = time.perf_counter()
 
                         load_started_at = time.perf_counter()
-                        load_page(page, url, crawl_config)
+                        response = load_page(page, url, crawl_config)
                         load_seconds = time.perf_counter() - load_started_at
+                        final_url = normalize_url(page.url)
+                        status = response.status if response else None
+                        if status and status >= 400:
+                            raise RuntimeError(f"HTTP {status}")
+
+                        with state_condition:
+                            url_id = url_identity(url)
+                            final_id = url_identity(final_url)
+                            duplicate_after_redirect = (
+                                final_id != url_id
+                                and (final_id in visited or final_id in in_progress)
+                            )
+                            if duplicate_after_redirect:
+                                in_progress.discard(url_id)
+                                state_condition.notify_all()
+                                continue
+                            if final_id != url_id:
+                                known_urls.add(final_id)
+                                in_progress.discard(url_id)
+                                in_progress.add(final_id)
 
                         headings_started_at = time.perf_counter()
                         page_data = extract_headings(page)
+                        page_data["url"] = final_url
                         headings_seconds = time.perf_counter() - headings_started_at
 
                         validation_started_at = time.perf_counter()
@@ -278,13 +318,17 @@ def crawl_site(
                             timing_totals["page_total_seconds"] += page_total_seconds
 
                         with state_condition:
-                            in_progress.discard(url)
-                            visited.add(url)
+                            url_id = url_identity(url)
+                            final_id = url_identity(final_url)
+                            in_progress.discard(url_id)
+                            in_progress.discard(final_id)
+                            visited.add(final_id)
                             if not should_cancel():
                                 for link in new_links:
-                                    if link not in visited and link not in in_progress and link not in queued:
+                                    link_id = url_identity(link)
+                                    if link_id not in visited and link_id not in in_progress and link_id not in known_urls:
                                         queue.append(link)
-                                        queued.add(link)
+                                        known_urls.add(link_id)
                             current_count = len(visited)
                             state_condition.notify_all()
 
@@ -315,8 +359,9 @@ def crawl_site(
                             "timings": {},
                         }
                         with state_condition:
-                            in_progress.discard(url)
-                            visited.add(url)
+                            url_id = url_identity(url)
+                            in_progress.discard(url_id)
+                            visited.add(url_id)
                             current_count = len(visited)
                             state_condition.notify_all()
                         with report_lock:

@@ -4,24 +4,24 @@
 const API_BASE = window.location.protocol === "file:" ? "http://localhost:5001" : "";
 
 // DOM refs
-const toastEl             = document.getElementById("toast");
-const jobsListEl          = document.getElementById("jobsList");
-const reportsListEl       = document.getElementById("reportsList");
-const modeToggle          = document.getElementById("modeToggle");
-const urlInput            = document.getElementById("urlInput");
-const urlLabel            = document.getElementById("urlLabel");
-const limitField          = document.getElementById("limitField");
-const maxPagesInput       = document.getElementById("maxPaginas");
-const submitBtn           = document.getElementById("submitBtn");
-const clearBtn            = document.getElementById("clearBtn");
-const reportsRefreshBtn   = document.getElementById("reportsRefreshBtn");
+const toastEl = document.getElementById("toast");
+const jobsListEl = document.getElementById("jobsList");
+const reportsListEl = document.getElementById("reportsList");
+const modeToggle = document.getElementById("modeToggle");
+const urlInput = document.getElementById("urlInput");
+const urlLabel = document.getElementById("urlLabel");
+const limitField = document.getElementById("limitField");
+const maxPagesInput = document.getElementById("maxPaginas");
+const submitBtn = document.getElementById("submitBtn");
+const clearBtn = document.getElementById("clearBtn");
+const reportsRefreshBtn = document.getElementById("reportsRefreshBtn");
 const reportsDeleteAllBtn = document.getElementById("reportsDeleteAllBtn");
 
-let crawlMode    = "single";
+let crawlMode = "single";
 let hiddenJobIds = new Set();
-let jobFilters   = {}; // per-job filter state: "all" | "errors"
-let jobShowAll   = {}; // per-job: whether to show all pages beyond PAGE_LIMIT
-let openPages    = {}; // per-job+page open/closed state
+let jobFilters = {}; // per-job filter state: "all" | "errors"
+let jobShowAll = {}; // per-job: whether to show all pages beyond PAGE_LIMIT
+let openPages = {}; // per-job+page open/closed state
 
 // Escapes HTML special characters
 function esc(v) {
@@ -120,7 +120,7 @@ function getIssueClass(issue) {
 // Renders the heading tree for a single page report
 function renderHeadingTree(report, filter) {
   const headings = report.considered_headings || [];
-  const issues   = report.issues || [];
+  const issues = report.issues || [];
 
   // Group issues by heading index for O(1) lookup
   const issuesByHeading = {};
@@ -148,12 +148,12 @@ function renderHeadingTree(report, filter) {
 
   for (const h of headings) {
     const rowIssues = issuesByHeading[h.index] || [];
-    const hasError  = rowIssues.length > 0;
+    const hasError = rowIssues.length > 0;
 
     if (filter === "errors" && !hasError) continue;
 
-    const indentPx   = Math.max(0, h.level - 1) * 14;
-    const isEmpty    = !h.text || h.is_empty;
+    const indentPx = Math.max(0, h.level - 1) * 14;
+    const isEmpty = !h.text || h.is_empty;
     const displayText = isEmpty ? "(heading vazio)" : h.text;
 
     const badgesHtml = rowIssues.map(i =>
@@ -177,9 +177,9 @@ const PAGE_LIMIT = 12;
 
 // Renders the list of pages for a finished job
 function renderPagesList(job, reports) {
-  const jobId     = job.id;
-  const filter    = jobFilters[jobId] || "all";
-  const showAll   = jobShowAll[jobId] || false;
+  const jobId = job.id;
+  const filter = jobFilters[jobId] || "all";
+  const showAll = jobShowAll[jobId] || false;
 
   const filtered = filter === "errors" ? reports.filter(r => !r.valid) : reports;
 
@@ -189,15 +189,15 @@ function renderPagesList(job, reports) {
       : `<div style="padding:12px 0;font-size:12px;color:var(--muted);font-family:var(--mono)">Sem páginas para mostrar.</div>`;
   }
 
-  const visible   = showAll ? filtered : filtered.slice(0, PAGE_LIMIT);
+  const visible = showAll ? filtered : filtered.slice(0, PAGE_LIMIT);
   const remaining = filtered.length - visible.length;
 
   const pagesHtml = visible.map(r => {
-    const pageKey    = jobId + ":" + r.url;
-    const isOpen     = openPages[pageKey] || false;
-    const hasError   = !r.valid;
+    const pageKey = jobId + ":" + r.url;
+    const isOpen = openPages[pageKey] || false;
+    const hasError = !r.valid;
     const issueCount = (r.issues || []).length;
-    const isPageErr  = r.issues && r.issues.some(i => i.rule === "page_error");
+    const isPageErr = r.issues && r.issues.some(i => i.rule === "page_error");
 
     return `
       <div class="page-item${hasError ? " has-issues" : ""}${isOpen ? " open" : ""}" data-page-key="${esc(pageKey)}">
@@ -239,9 +239,10 @@ function renderJobBody(job) {
     const partialReports = progress.partial_reports_with_errors || [];
     let html = `<div style="font-size:12px;color:var(--muted);font-family:var(--mono);padding:4px 0">${esc(progress.message || "A aguardar...")}</div>`;
     if (job.state === "a_correr" && partialReports.length > 0) {
+      const partialCount = progress.partial_pages_with_issues || partialReports.length;
       html += `
         <div class="pages-header" style="margin-top: 12px; margin-bottom: 6px;">
-          <span class="pages-header-title">Erros encontrados até agora</span>
+          <span class="pages-header-title">Erros encontrados até agora (${partialCount})</span>
         </div>
         ${renderPagesList(job, partialReports)}
       `;
@@ -249,12 +250,12 @@ function renderJobBody(job) {
     return html;
   }
 
-  const reports         = result.reports || [];
-  const pagesCrawled    = result.pages_crawled || 0;
+  const reports = result.reports || [];
+  const pagesCrawled = result.pages_crawled || 0;
   const pagesWithErrors = result.pages_with_issues || 0;
-  const pagesOk         = pagesCrawled - pagesWithErrors;
-  const jobId           = job.id;
-  const filter          = jobFilters[jobId] || "all";
+  const pagesOk = pagesCrawled - pagesWithErrors;
+  const jobId = job.id;
+  const filter = jobFilters[jobId] || "all";
 
   const summaryHtml = `
     <div class="summary">
@@ -300,13 +301,13 @@ function renderJobs(allJobs) {
   }
 
   jobsListEl.innerHTML = visible.map(job => {
-    const progress  = job.progress || {};
-    const pct       = progress.percentage ?? 0;
-    const hasTotal  = (progress.total || 0) > 0;
+    const progress = job.progress || {};
+    const pct = progress.percentage ?? 0;
+    const hasTotal = (progress.total || 0) > 0;
     const isRunning = job.state === "a_correr";
     const isIndeterminate = isRunning && !hasTotal;
     const progressLabel = hasTotal ? `${pct}%` : `${progress.current || 0} páginas`;
-    const isDone    = ["concluida", "erro", "cancelada"].includes(job.state);
+    const isDone = ["concluida", "erro", "cancelada"].includes(job.state);
     const canCancel = ["pendente", "a_correr"].includes(job.state);
     const statusMsg = buildProgressMsg(job);
 
@@ -433,11 +434,11 @@ function buildProgressMsg(job) {
     return "";
   }
   if (p.phase === "crawl" || p.phase === "analise") {
-    const current    = p.current || 0;
-    const total      = p.total || 0;
+    const current = p.current || 0;
+    const total = p.total || 0;
     const errorPages = p.pages_with_issues || 0;
-    if (total)   return `${current} / ${total} páginas visitadas · ${errorPages} páginas com problemas`;
-    if (current) return `${current} páginas visitadas · ${errorPages} páginas com problemas`;
+    if (total) return `${current} / ${total} páginas visitadas - ${errorPages} páginas com problemas`;
+    if (current) return `${current} páginas visitadas - ${errorPages} páginas com problemas`;
   }
   return p.message || "A aguardar...";
 }

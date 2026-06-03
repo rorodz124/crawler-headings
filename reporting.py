@@ -182,7 +182,7 @@ def _render_html_report(result: dict) -> str:
     </div>
 
     <div class="timings-bar">
-      Tempo total: {escape(str(elapsed))}s &nbsp;·&nbsp; Media por pagina: {escape(str(avg))}s &nbsp;·&nbsp; Paginas/s: {escape(str(pps))}
+      Tempo total: {escape(str(elapsed))}s &nbsp;-&nbsp; Media por pagina: {escape(str(avg))}s &nbsp;-&nbsp; Paginas/s: {escape(str(pps))}
     </div>
 
     <div class="pages-header">

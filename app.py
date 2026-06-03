@@ -22,11 +22,10 @@ REPORTS_DIR = BASE_DIR / "relatorios_headings"
 
 MAX_JOBS = 20
 MAX_LOGS = 120
-WORKERS  = 6
+WORKERS = 6
 
 app = Flask(__name__)
 CORS(app)
-
 
 class JobManager:
     def __init__(self):
@@ -157,9 +156,7 @@ class JobManager:
             j["progress"]    = {**j["progress"], "phase": state, "message": error}
             j["logs"].append(error)
 
-
 job_manager = JobManager()
-
 
 def _error_response(msg, status=400):
     return jsonify({"error": msg}), status
@@ -181,7 +178,8 @@ def _launch_job(job_type, title, runner):
         if not job_manager._mark_running(job_id):
             return
 
-        partial_reports_with_errors = []
+        partial_reports_with_errors = {}
+        partial_reports_lock = threading.Lock()
 
         def on_progress(current, total, url, issue_count, timings, pages_with_issues=0, *args, **kwargs):
             progress_message = (
@@ -191,7 +189,18 @@ def _launch_job(job_type, title, runner):
             )
             report = kwargs.get("report")
             if report and not report.get("valid") and report.get("issues"):
-                partial_reports_with_errors.append(report)
+                with partial_reports_lock:
+                    partial_reports_with_errors[report.get("url") or url] = report
+                    partial_reports_snapshot = sorted(
+                        partial_reports_with_errors.values(),
+                        key=lambda item: item.get("url") or "",
+                    )
+            else:
+                with partial_reports_lock:
+                    partial_reports_snapshot = sorted(
+                        partial_reports_with_errors.values(),
+                        key=lambda item: item.get("url") or "",
+                    )
 
             job_manager.update_progress(job_id, {
                 "phase":             "analise",
@@ -199,7 +208,8 @@ def _launch_job(job_type, title, runner):
                 "current":           current,
                 "total":             total,
                 "pages_with_issues": pages_with_issues,
-                "partial_reports_with_errors": list(partial_reports_with_errors),
+                "partial_pages_with_issues": len(partial_reports_snapshot),
+                "partial_reports_with_errors": partial_reports_snapshot,
             })
 
         def should_cancel():
