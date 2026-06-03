@@ -4,187 +4,94 @@ import threading
 import time
 from collections import deque
 from contextlib import contextmanager
-import re
-from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import urljoin, urlparse
 
 from playwright.sync_api import sync_playwright
 
-from config import (
-    IGNORED_EXTENSIONS,
-    IGNORED_PATH_PREFIXES,
-    IGNORED_SCHEMES,
-    TRACKING_PARAMS_EXACT,
-    TRACKING_PARAMS_PREFIXES,
-    AuditConfig,
-    CrawlConfig,
-)
+from config import AuditConfig, CrawlConfig
 from heading_extractor import extract_headings
 from heading_rules import validate_headings
+from url_utils import ( fetch_sitemap_urls, is_pagination, is_same_domain,
+    normalize_url, should_skip, url_key,)
 
-
-EXTRACT_LINKS_SCRIPT = """
+_EXTRACT_LINKS_JS = """
 () => {
-  const values = [];
-  const add = (value) => {
-    if (typeof value === "string" && value.trim()) values.push(value.trim());
-  };
-
-  document.querySelectorAll("a[href], area[href]").forEach((node) => {
-    add(node.getAttribute("href"));
+  const s = new Set();
+  document.querySelectorAll("a[href], area[href]").forEach(el => {
+    const v = (el.getAttribute("href") || "").trim();
+    if (v) s.add(v);
   });
-
-  document.querySelectorAll("link[href][rel~='canonical'], link[href][rel~='alternate'], link[href][rel~='next'], link[href][rel~='prev']").forEach((node) => {
-    add(node.getAttribute("href"));
-  });
-
-  return values;
+  document.querySelectorAll(
+    "link[rel~='canonical'], link[rel~='alternate'], link[rel~='next'], link[rel~='prev']"
+  ).forEach(el => { const v = (el.getAttribute("href") || "").trim(); if (v) s.add(v); });
+  return Array.from(s);
 }
 """
 
-ABSOLUTE_URL_RE = re.compile(r"https?:\\?/\\?/[^\\\"'<>\s\])}]+", re.IGNORECASE)
-ROOT_PATH_RE = re.compile(r"""["'=(:]\s*(/(?!/|_next/|assets/|uploads/)[A-Za-z0-9][^\\\"'<>\s\])}]*)""")
-
-def should_ignore_url(url: str) -> bool:
-    if not url:
-        return True
-    lowered = url.lower()
-    if lowered.startswith(IGNORED_SCHEMES):
-        return True
-    parsed = urlparse(lowered)
-    if any(parsed.path.startswith(prefix) for prefix in IGNORED_PATH_PREFIXES):
-        return True
-    filename = parsed.path.rsplit("/", 1)[-1]
-    if "." in filename:
-        return True
-    return any(parsed.path.endswith(ext) for ext in IGNORED_EXTENSIONS)
-
-
-def normalize_url(url: str) -> str:
-    parsed = urlparse(url)
-    scheme = (parsed.scheme or "").lower()
-    netloc = (parsed.netloc or "").lower()
-    filtered_qs = [
-        (key, value)
-        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
-        if key not in TRACKING_PARAMS_EXACT
-        and not any(key.startswith(prefix) for prefix in TRACKING_PARAMS_PREFIXES)
-    ]
-    filtered_qs.sort()
-    path = parsed.path or "/"
-    if path != "/":
-        path = path.rstrip("/")
-    return urlunparse(parsed._replace(scheme=scheme, netloc=netloc, fragment="", query=urlencode(filtered_qs, doseq=True), path=path))
-
-
-def url_identity(url: str) -> str:
-    """Canonical key for dedupe without changing the URL that will be fetched."""
-    normalized = normalize_url(url)
-    parsed = urlparse(normalized)
-    return urlunparse(parsed._replace(netloc=canonical_netloc(parsed.netloc)))
-
-
-def same_domain(url: str, base_netloc: str, include_subdomains: bool) -> bool:
-    candidate = canonical_netloc(urlparse(url).netloc)
-    base = canonical_netloc(base_netloc)
-    if include_subdomains:
-        return candidate == base or candidate.endswith("." + base)
-    return candidate == base
-
-
-def canonical_netloc(netloc: str) -> str:
-    netloc = (netloc or "").lower()
-    return netloc[4:] if netloc.startswith("www.") else netloc
-
-
-def iter_candidate_hrefs(raw_value: str):
-    value = (raw_value or "").strip()
-    if not value:
-        return
-    if "<" not in value and len(value) <= 2048:
-        yield value
-    if "<" not in value and "http" not in value and "/" not in value:
-        return
-    for match in ABSOLUTE_URL_RE.finditer(value):
-        yield match.group(0).replace("\\/", "/")
-    for match in ROOT_PATH_RE.finditer(value):
-        yield match.group(1).replace("\\/", "/")
-
-
 @contextmanager
-def open_browser():
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
+def _browser():
+    with sync_playwright() as pw:
+        b = pw.chromium.launch(headless=True)
         try:
-            yield browser
+            yield b
         finally:
-            browser.close()
+            b.close()
 
 
-def new_page(browser, crawl_config: CrawlConfig):
-    context = browser.new_context(
-        user_agent=crawl_config.user_agent,
-        viewport={"width": 1280, "height": 800},
-        java_script_enabled=True,
-    )
-    page = context.new_page()
-    page.route(
-        "**/*",
-        lambda route: route.abort()
-        if route.request.resource_type in crawl_config.blocked_resource_types
-        else route.continue_(),
-    )
+def _new_page(browser, cfg: CrawlConfig):
+    ctx = browser.new_context(user_agent=cfg.user_agent, viewport={"width": 1280, "height": 800})
+    page = ctx.new_page()
+    page.route("**/*", lambda r: r.abort() if r.request.resource_type in cfg.blocked_resource_types else r.continue_())
     return page
 
 
-def load_page(page, url: str, crawl_config: CrawlConfig):
-    headings_selector = "h1, h2, h3, h4, h5, h6"
-    h1_selector = "h1"
-    page.set_default_timeout(crawl_config.timeout_ms)
-    page.set_default_navigation_timeout(crawl_config.timeout_ms)
-    # Fast path: avoid waiting for analytics/API calls that keep networkidle busy.
+def _load_page(page, url: str, cfg: CrawlConfig):
+    page.set_default_timeout(cfg.timeout_ms)
+    page.set_default_navigation_timeout(cfg.timeout_ms)
     try:
-        response = page.goto(url, timeout=crawl_config.timeout_ms, wait_until="domcontentloaded")
+        resp = page.goto(url, timeout=cfg.timeout_ms, wait_until="domcontentloaded")
     except Exception:
-        response = page.goto(url, timeout=crawl_config.timeout_ms, wait_until="commit")
+        try:
+            resp = page.goto(url, timeout=cfg.timeout_ms, wait_until="commit")
+        except Exception as exc:
+            raise RuntimeError(f"Falha ao navegar: {exc}") from exc
 
-    if crawl_config.settle_delay_ms > 0:
-        page.wait_for_timeout(crawl_config.settle_delay_ms)
-
-    # Client-rendered pages can paint secondary headings before the main h1.
+    if cfg.settle_delay_ms > 0:
+        page.wait_for_timeout(cfg.settle_delay_ms)
+    for sel in ("h1", "h1, h2, h3, h4, h5, h6"):
+        try:
+            page.wait_for_selector(sel, timeout=cfg.extra_wait_for_headings_ms)
+            break
+        except Exception:
+            pass
     try:
-        page.wait_for_selector(h1_selector, timeout=crawl_config.extra_wait_for_headings_ms)
-    except Exception:
-        pass
-
-    # If there is no h1, still give the page a bounded chance to render headings.
-    try:
-        page.wait_for_selector(headings_selector, timeout=crawl_config.extra_wait_for_headings_ms)
+        page.wait_for_load_state("networkidle", timeout=cfg.networkidle_timeout_ms)
     except Exception:
         pass
+    if cfg.settle_delay_ms > 0:
+        page.wait_for_timeout(cfg.settle_delay_ms)
+    return resp
 
+
+def _extract_links(page, current_url: str, base_host: str, cfg: CrawlConfig) -> set[str]:
+    cur_key = url_key(current_url)
+    links: set[str] = set()
     try:
-        page.wait_for_load_state("networkidle", timeout=crawl_config.networkidle_timeout_ms)
+        hrefs = page.evaluate(_EXTRACT_LINKS_JS)
     except Exception:
-        pass
-
-    if crawl_config.settle_delay_ms > 0:
-        page.wait_for_timeout(crawl_config.settle_delay_ms)
-
-    return response
-
-
-def extract_links(page, current_url: str, base_netloc: str, crawl_config: CrawlConfig) -> set[str]:
-    current_identity = url_identity(current_url)
-    links = set()
-    for raw_value in page.evaluate(EXTRACT_LINKS_SCRIPT):
-        for href in iter_candidate_hrefs(raw_value):
-            absolute = normalize_url(urljoin(current_url, href))
-            if (
-                url_identity(absolute) != current_identity
-                and not should_ignore_url(absolute)
-                and same_domain(absolute, base_netloc, crawl_config.include_subdomains)
-            ):
-                links.add(absolute)
+        return links
+    for href in hrefs:
+        try:
+            abs_url = normalize_url(urljoin(current_url, href))
+        except Exception:
+            continue
+        if url_key(abs_url) == cur_key:
+            continue
+        if should_skip(abs_url) or is_pagination(abs_url):
+            continue
+        if not is_same_domain(abs_url, base_host, cfg.include_subdomains):
+            continue
+        links.add(abs_url)
     return links
 
 
@@ -195,216 +102,193 @@ def crawl_site(
     on_progress=None,
     should_cancel=None,
 ) -> dict:
-    crawl_started_at = time.perf_counter()
+    crawl_start = time.perf_counter()
     base_url = normalize_url(url_base)
-    base_netloc = urlparse(base_url).netloc
+    base_host = urlparse(base_url).netloc
     should_cancel = should_cancel or (lambda: False)
-    has_page_limit = crawl_config.max_pages > 0
+    has_limit = crawl_config.max_pages > 0
 
-    queue = deque([base_url])
-    known_urls = {url_identity(base_url)}
-    visited = set()
-    in_progress = set()
-    reports = []
-    timing_totals = {
-        "load_seconds": 0.0,
-        "headings_seconds": 0.0,
-        "links_seconds": 0.0,
-        "validation_seconds": 0.0,
-        "page_total_seconds": 0.0,
-    }
+    visited:    set[str]   = set()
+    in_progress: set[str]  = set()
+    known_keys: set[str]   = {url_key(base_url)}
+    queue:      deque[str] = deque([base_url])
+    reports:    list[dict] = []
 
-    state_condition = threading.Condition()
-    report_lock = threading.Lock()
-    timing_lock = threading.Lock()
+    state_lock   = threading.Condition()
+    reports_lock = threading.Lock()
+    timing_lock  = threading.Lock()
+    totals = {"load": 0.0, "headings": 0.0, "links": 0.0, "validation": 0.0, "page_total": 0.0}
 
-    def take_next_url():
-        with state_condition:
+    # Fase 0 — sitemap (pré-crawl, browser dedicado)
+    if crawl_config.max_pages != 1:
+        try:
+            with _browser() as b:
+                p = _new_page(b, crawl_config)
+                try:
+                    for su in fetch_sitemap_urls(base_url, p, crawl_config):
+                        k, n = url_key(su), normalize_url(su)
+                        if k not in known_keys and not is_pagination(n) and not should_skip(n):
+                            queue.append(n)
+                            known_keys.add(k)
+                finally:
+                    p.context.close()
+        except Exception:
+            pass
+
+    def take_next() -> str | None:
+        with state_lock:
             while True:
-                reached_page_limit = (
-                    has_page_limit
-                    and len(visited) + len(in_progress) >= crawl_config.max_pages
-                )
-                if should_cancel() or reached_page_limit:
+                if should_cancel():
                     return None
-
+                if has_limit and (len(visited) + len(in_progress)) >= crawl_config.max_pages:
+                    return None
                 if queue:
-                    url = queue.popleft()
-                    url_id = url_identity(url)
-                    if url_id in visited or url_id in in_progress:
+                    u = queue.popleft()
+                    k = url_key(u)
+                    if k in visited or k in in_progress:
                         continue
-                    in_progress.add(url_id)
-                    return url
-
+                    in_progress.add(k)
+                    return u
                 if not in_progress:
                     return None
+                state_lock.wait(timeout=0.3)
 
-                state_condition.wait(timeout=0.25)
+    def release(key: str, visited_flag: bool = True) -> None:
+        with state_lock:
+            in_progress.discard(key)
+            if visited_flag:
+                visited.add(key)
+            state_lock.notify_all()
 
-    def worker():
-        # Playwright sync API não permite partilhar objetos entre threads.
-        # Cada worker abre o seu próprio browser dentro da própria thread.
-        with open_browser() as browser:
-            page = new_page(browser, crawl_config)
+    def enqueue(links: set[str]) -> None:
+        with state_lock:
+            for link in links:
+                k = url_key(link)
+                if k not in visited and k not in in_progress and k not in known_keys:
+                    queue.append(link)
+                    known_keys.add(k)
+            state_lock.notify_all()
+
+    def worker() -> None:
+        with _browser() as browser:
+            page = _new_page(browser, crawl_config)
             try:
                 while True:
-                    url = take_next_url()
+                    url = take_next()
                     if url is None:
                         break
+                    ukey = url_key(url)
+                    if should_cancel():
+                        release(ukey, False)
+                        break
 
+                    t0_page = time.perf_counter()
                     try:
-                        if should_cancel():
-                            with state_condition:
-                                in_progress.discard(url_identity(url))
-                                state_condition.notify_all()
-                            break
+                        t0 = time.perf_counter()
+                        resp = _load_page(page, url, crawl_config)
+                        t_load = time.perf_counter() - t0
 
-                        page_started_at = time.perf_counter()
+                        if resp and resp.status >= 400:
+                            raise RuntimeError(f"HTTP {resp.status}")
 
-                        load_started_at = time.perf_counter()
-                        response = load_page(page, url, crawl_config)
-                        load_seconds = time.perf_counter() - load_started_at
                         final_url = normalize_url(page.url)
-                        status = response.status if response else None
-                        if status and status >= 400:
-                            raise RuntimeError(f"HTTP {status}")
+                        fkey = url_key(final_url)
 
-                        with state_condition:
-                            url_id = url_identity(url)
-                            final_id = url_identity(final_url)
-                            duplicate_after_redirect = (
-                                final_id != url_id
-                                and (final_id in visited or final_id in in_progress)
-                            )
-                            if duplicate_after_redirect:
-                                in_progress.discard(url_id)
-                                state_condition.notify_all()
-                                continue
-                            if final_id != url_id:
-                                known_urls.add(final_id)
-                                in_progress.discard(url_id)
-                                in_progress.add(final_id)
+                        if fkey != ukey:
+                            with state_lock:
+                                if fkey in visited or fkey in in_progress:
+                                    in_progress.discard(ukey)
+                                    state_lock.notify_all()
+                                    continue
+                                in_progress.discard(ukey)
+                                in_progress.add(fkey)
+                                known_keys.add(fkey)
 
-                        headings_started_at = time.perf_counter()
+                        t0 = time.perf_counter()
                         page_data = extract_headings(page)
                         page_data["url"] = final_url
-                        headings_seconds = time.perf_counter() - headings_started_at
+                        t_headings = time.perf_counter() - t0
 
-                        validation_started_at = time.perf_counter()
+                        t0 = time.perf_counter()
                         report = validate_headings(page_data, audit_config)
-                        validation_seconds = time.perf_counter() - validation_started_at
+                        t_validation = time.perf_counter() - t0
 
-                        links_started_at = time.perf_counter()
-                        new_links = extract_links(page, page.url, base_netloc, crawl_config)
-                        links_seconds = time.perf_counter() - links_started_at
+                        t0 = time.perf_counter()
+                        if crawl_config.max_pages != 1:
+                            enqueue(_extract_links(page, page.url, base_host, crawl_config))
+                        t_links = time.perf_counter() - t0
 
-                        page_total_seconds = time.perf_counter() - page_started_at
+                        t_page = time.perf_counter() - t0_page
                         report["timings"] = {
-                            "load_seconds": round(load_seconds, 4),
-                            "headings_seconds": round(headings_seconds, 4),
-                            "validation_seconds": round(validation_seconds, 4),
-                            "links_seconds": round(links_seconds, 4),
-                            "page_total_seconds": round(page_total_seconds, 4),
+                            "load_seconds":       round(t_load, 4),
+                            "headings_seconds":   round(t_headings, 4),
+                            "validation_seconds": round(t_validation, 4),
+                            "links_seconds":      round(t_links, 4),
+                            "page_total_seconds": round(t_page, 4),
                         }
 
-                        with report_lock:
+                        with reports_lock:
                             reports.append(report)
-                            pages_with_issues = sum(1 for item in reports if not item["valid"])
+                            pages_with_issues = sum(1 for r in reports if not r["valid"])
                         with timing_lock:
-                            timing_totals["load_seconds"] += load_seconds
-                            timing_totals["headings_seconds"] += headings_seconds
-                            timing_totals["validation_seconds"] += validation_seconds
-                            timing_totals["links_seconds"] += links_seconds
-                            timing_totals["page_total_seconds"] += page_total_seconds
+                            totals["load"]       += t_load
+                            totals["headings"]   += t_headings
+                            totals["validation"] += t_validation
+                            totals["links"]      += t_links
+                            totals["page_total"] += t_page
 
-                        with state_condition:
-                            url_id = url_identity(url)
-                            final_id = url_identity(final_url)
-                            in_progress.discard(url_id)
-                            in_progress.discard(final_id)
-                            visited.add(final_id)
-                            if not should_cancel():
-                                for link in new_links:
-                                    link_id = url_identity(link)
-                                    if link_id not in visited and link_id not in in_progress and link_id not in known_urls:
-                                        queue.append(link)
-                                        known_urls.add(link_id)
-                            current_count = len(visited)
-                            state_condition.notify_all()
+                        release(fkey)
+                        if fkey != ukey:
+                            release(ukey, False)
 
                         if on_progress:
-                            on_progress(
-                                current_count,
-                                crawl_config.max_pages,
-                                report["url"],
-                                report["summary"]["issue_count"],
-                                report["timings"],
-                                pages_with_issues,
-                                report=report,
-                            )
+                            with reports_lock:
+                                cnt = len(visited)
+                            on_progress(cnt, crawl_config.max_pages, report["url"],
+                                        report["summary"]["issue_count"], report["timings"],
+                                        pages_with_issues, report=report)
+
                     except Exception as exc:
-                        error_report = {
-                            "url": url,
-                            "title": "",
-                            "headings": [],
+                        err = {
+                            "url": url, "title": "", "headings": [],
                             "considered_headings": [],
                             "issues": [{"rule": "page_error", "message": str(exc)}],
                             "valid": False,
-                            "summary": {
-                                "total_headings": 0,
-                                "considered_headings": 0,
-                                "h1_count": 0,
-                                "issue_count": 1,
-                            },
+                            "summary": {"total_headings": 0, "considered_headings": 0, "h1_count": 0, "issue_count": 1},
                             "timings": {},
                         }
-                        with state_condition:
-                            url_id = url_identity(url)
-                            in_progress.discard(url_id)
-                            visited.add(url_id)
-                            current_count = len(visited)
-                            state_condition.notify_all()
-                        with report_lock:
-                            reports.append(error_report)
-                            pages_with_issues = sum(1 for item in reports if not item["valid"])
+                        with reports_lock:
+                            reports.append(err)
+                            pages_with_issues = sum(1 for r in reports if not r["valid"])
+                        release(ukey)
                         if on_progress:
-                            on_progress(
-                                current_count,
-                                crawl_config.max_pages,
-                                url,
-                                1,
-                                {},
-                                pages_with_issues,
-                                report=error_report,
-                            )
+                            with reports_lock:
+                                cnt = len(visited)
+                            on_progress(cnt, crawl_config.max_pages, url, 1, {},
+                                        pages_with_issues, report=err)
             finally:
                 page.context.close()
 
     threads = [threading.Thread(target=worker, daemon=True) for _ in range(crawl_config.crawler_workers)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+    for t in threads: t.start()
+    for t in threads: t.join()
 
-    total_elapsed_seconds = time.perf_counter() - crawl_started_at
-    pages_crawled = len(reports)
-    average_page_seconds = (timing_totals["page_total_seconds"] / pages_crawled) if pages_crawled else 0.0
-    pages_per_second = (pages_crawled / total_elapsed_seconds) if total_elapsed_seconds > 0 else 0.0
-
-    reports.sort(key=lambda item: item["url"])
+    elapsed = time.perf_counter() - crawl_start
+    n = len(reports)
+    reports.sort(key=lambda r: r["url"])
     return {
-        "base_url": base_url,
-        "pages_crawled": pages_crawled,
-        "pages_with_issues": sum(1 for report in reports if not report["valid"]),
+        "base_url":          base_url,
+        "pages_crawled":     n,
+        "pages_with_issues": sum(1 for r in reports if not r["valid"]),
         "timings": {
-            "total_elapsed_seconds": round(total_elapsed_seconds, 4),
-            "average_page_seconds": round(average_page_seconds, 4),
-            "pages_per_second": round(pages_per_second, 4),
-            "load_seconds": round(timing_totals["load_seconds"], 4),
-            "headings_seconds": round(timing_totals["headings_seconds"], 4),
-            "validation_seconds": round(timing_totals["validation_seconds"], 4),
-            "links_seconds": round(timing_totals["links_seconds"], 4),
-            "measured_page_total_seconds": round(timing_totals["page_total_seconds"], 4),
+            "total_elapsed_seconds":       round(elapsed, 4),
+            "average_page_seconds":        round(totals["page_total"] / n if n else 0, 4),
+            "pages_per_second":            round(n / elapsed if elapsed else 0, 4),
+            "load_seconds":                round(totals["load"], 4),
+            "headings_seconds":            round(totals["headings"], 4),
+            "validation_seconds":          round(totals["validation"], 4),
+            "links_seconds":               round(totals["links"], 4),
+            "measured_page_total_seconds": round(totals["page_total"], 4),
         },
         "reports": reports,
     }
