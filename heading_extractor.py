@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-EXTRACT_HEADINGS_SCRIPT = """
+EXTRACT_HEADINGS_SCRIPT = r"""
 () => {
   const cleanText = (v) => (v || "").replace(/\s+/g, " ").trim();
 
@@ -19,6 +19,16 @@ EXTRACT_HEADINGS_SCRIPT = """
 
     const ariaLabel = (el.getAttribute("aria-label") || "").trim();
     if (ariaLabel) return { hasImage: true, imageType: "aria-label", imageAlt: ariaLabel };
+
+    const labelledBy = el.getAttribute("aria-labelledby");
+    if (labelledBy) {
+      const labelText = labelledBy.split(/\s+/)
+        .map(id => document.getElementById(id))
+        .filter(Boolean)
+        .map(ref => cleanText(ref.textContent))
+        .join(" ").trim();
+      if (labelText) return { hasImage: true, imageType: "aria-labelledby", imageAlt: labelText };
+    }
 
     for (const e of [el, ...el.querySelectorAll("*")]) {
       const bg = window.getComputedStyle(e).backgroundImage || "";
@@ -68,6 +78,7 @@ EXTRACT_HEADINGS_SCRIPT = """
   return { title: document.title || "", url: window.location.href, headings: items };
 }
 """
+
 
 def extract_headings(page) -> dict:
     return page.evaluate(EXTRACT_HEADINGS_SCRIPT)

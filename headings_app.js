@@ -3,27 +3,35 @@
 
 const API_BASE = window.location.protocol === "file:" ? "http://localhost:5001" : "";
 
-// DOM refs
-const toastEl = document.getElementById("toast");
-const jobsListEl = document.getElementById("jobsList");
-const reportsListEl = document.getElementById("reportsList");
-const modeToggle = document.getElementById("modeToggle");
-const urlInput = document.getElementById("urlInput");
-const urlLabel = document.getElementById("urlLabel");
-const limitField = document.getElementById("limitField");
-const maxPagesInput = document.getElementById("maxPaginas");
-const submitBtn = document.getElementById("submitBtn");
-const clearBtn = document.getElementById("clearBtn");
-const reportsRefreshBtn = document.getElementById("reportsRefreshBtn");
-const reportsDeleteAllBtn = document.getElementById("reportsDeleteAllBtn");
+const toastEl          = document.getElementById("toast");
+const jobsListEl       = document.getElementById("jobsList");
+const reportsListEl    = document.getElementById("reportsList");
+const modeToggle       = document.getElementById("modeToggle");
+const urlInput         = document.getElementById("urlInput");
+const urlLabel         = document.getElementById("urlLabel");
+const limitField       = document.getElementById("limitField");
+const maxPagesInput    = document.getElementById("maxPaginas");
+const submitBtn        = document.getElementById("submitBtn");
+const clearBtn         = document.getElementById("clearBtn");
+const reportsRefreshBtn    = document.getElementById("reportsRefreshBtn");
+const reportsDeleteAllBtn  = document.getElementById("reportsDeleteAllBtn");
 
 let crawlMode = "single";
 let hiddenJobIds = new Set();
-let jobFilters = {}; // per-job filter state: "all" | "errors"
-let jobShowAll = {}; // per-job: whether to show all pages beyond PAGE_LIMIT
-let openPages = {}; // per-job+page open/closed state
+let jobFilters = {};
+let jobShowAll = {};
+let openPages = {};
 
-// Escapes HTML special characters
+let _pollTimer = null;
+function schedulePolling(fast = false) {
+  clearTimeout(_pollTimer);
+  _pollTimer = setTimeout(async () => {
+    const hasActive = await refreshJobs({ silent: true });
+    await refreshReports({ silent: true });
+    schedulePolling(hasActive);
+  }, fast ? 2500 : 9000);
+}
+
 function esc(v) {
   return String(v ?? "")
     .replaceAll("&", "&amp;").replaceAll("<", "&lt;")
@@ -38,7 +46,9 @@ function formatBytes(b) {
 
 function formatDate(iso) {
   if (!iso) return "-";
-  return new Date(iso).toLocaleString("pt-PT");
+  const d = new Date(iso);
+  const p = n => String(n).padStart(2, "0");
+  return `${p(d.getDate())}/${p(d.getMonth()+1)}/${d.getFullYear()} às ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
 function showToast(msg, isError = false) {
@@ -48,7 +58,6 @@ function showToast(msg, isError = false) {
   toastEl._timer = setTimeout(() => toastEl.classList.remove("show"), 2800);
 }
 
-// Fetches JSON from the API, throws on error
 async function fetchJson(url, opts = {}) {
   const res = await fetch(`${API_BASE}${url}`, opts);
   const text = await res.text();
@@ -59,7 +68,6 @@ async function fetchJson(url, opts = {}) {
   return data;
 }
 
-// Sets active crawl mode and updates UI labels
 function setMode(mode) {
   crawlMode = mode;
   modeToggle.querySelectorAll(".tab-btn").forEach(b =>
@@ -84,12 +92,11 @@ submitBtn.addEventListener("click", async () => {
   const url = urlInput.value.trim();
   if (!url) { showToast("Indica a URL para auditar.", true); return; }
   const endpoint = crawlMode === "site" ? "/api/jobs/headings/site" : "/api/jobs/headings/pagina";
-  const body = { url, max_paginas: parseInt(maxPagesInput.value, 10) || 0 };
   try {
     await fetchJson(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ url, max_paginas: parseInt(maxPagesInput.value, 10) || 0 }),
     });
     showToast("Auditoria lançada.");
     urlInput.value = "";
@@ -98,41 +105,27 @@ submitBtn.addEventListener("click", async () => {
   } catch (e) { showToast(e.message, true); }
 });
 
-// Returns a human-readable label for a given issue rule
 function getIssueLabel(issue) {
-  switch (issue.rule) {
-    case "single_h1":       return "H1";
-    case "empty_heading":   return "Vazio";
-    case "hierarchy_skip":  return "Salto";
-    case "starts_too_deep": return "Início profundo";
-    case "page_error":      return "Erro de página";
-    default: return issue.rule || "?";
-  }
+  return { single_h1: "H1", empty_heading: "Vazio", hierarchy_skip: "Salto", starts_too_deep: "Início profundo", page_error: "Erro de página" }[issue.rule] ?? issue.rule ?? "?";
 }
 
-// Returns the CSS modifier class for a given issue badge
 function getIssueClass(issue) {
   if (issue.rule === "hierarchy_skip")  return "warn-skip";
   if (issue.rule === "starts_too_deep") return "warn-deep";
   return "";
 }
 
-// Renders the heading tree for a single page report
 function renderHeadingTree(report, filter) {
   const headings = report.considered_headings || [];
   const issues = report.issues || [];
 
-  // Group issues by heading index for O(1) lookup
   const issuesByHeading = {};
   for (const issue of issues) {
     if (issue.heading_index == null) continue;
-    if (!issuesByHeading[issue.heading_index]) issuesByHeading[issue.heading_index] = [];
-    issuesByHeading[issue.heading_index].push(issue);
+    (issuesByHeading[issue.heading_index] ??= []).push(issue);
   }
 
-  // Page-level issues have no heading_index (e.g. h1 count errors)
   const pageLevelIssues = issues.filter(i => i.heading_index == null);
-
   let html = '<div class="heading-list">';
 
   for (const pi of pageLevelIssues) {
@@ -149,38 +142,28 @@ function renderHeadingTree(report, filter) {
   for (const h of headings) {
     const rowIssues = issuesByHeading[h.index] || [];
     const hasError = rowIssues.length > 0;
-
     if (filter === "errors" && !hasError) continue;
-
-    const indentPx = Math.max(0, h.level - 1) * 14;
     const isEmpty = !h.text || h.is_empty;
-    const displayText = isEmpty ? "(heading vazio)" : h.text;
-
     const badgesHtml = rowIssues.map(i =>
       `<span class="h-issue-badge ${getIssueClass(i)}">${esc(getIssueLabel(i))}</span>`
     ).join("");
-
-    html += `
-      <div class="h-row${hasError ? " h-error" : ""}">
-        <span class="h-indent" style="width:${indentPx}px;flex-shrink:0"></span>
+    html += `<div class="h-row${hasError ? " h-error" : ""}">
+        <span class="h-indent" style="width:${Math.max(0, h.level - 1) * 14}px;flex-shrink:0"></span>
         <span class="h-tag ${esc(h.tag)}">${esc(h.tag)}</span>
-        <span class="h-text${isEmpty ? " empty-text" : ""}">${esc(displayText)}</span>
+        <span class="h-text${isEmpty ? " empty-text" : ""}">${esc(isEmpty ? "(heading vazio)" : h.text)}</span>
         ${badgesHtml ? `<div class="h-issues">${badgesHtml}</div>` : ""}
       </div>`;
   }
 
-  html += "</div>";
-  return html;
+  return html + "</div>";
 }
 
 const PAGE_LIMIT = 12;
 
-// Renders the list of pages for a finished job
 function renderPagesList(job, reports) {
   const jobId = job.id;
   const filter = jobFilters[jobId] || "all";
   const showAll = jobShowAll[jobId] || false;
-
   const filtered = filter === "errors" ? reports.filter(r => !r.valid) : reports;
 
   if (!filtered.length) {
@@ -198,36 +181,27 @@ function renderPagesList(job, reports) {
     const hasError = !r.valid;
     const issueCount = (r.issues || []).length;
     const isPageErr = r.issues && r.issues.some(i => i.rule === "page_error");
-
-    return `
-      <div class="page-item${hasError ? " has-issues" : ""}${isOpen ? " open" : ""}" data-page-key="${esc(pageKey)}">
+    return `<div class="page-item${hasError ? " has-issues" : ""}${isOpen ? " open" : ""}" data-page-key="${esc(pageKey)}">
         <div class="page-item-head" data-toggle-page="${esc(pageKey)}">
           <span class="page-chevron">▶</span>
           <span class="page-url" title="${esc(r.url)}">${esc(r.url)}</span>
           <button class="copy-url-btn" data-copy-url="${esc(r.url)}" title="Copiar link" type="button">⎘</button>
-          <span class="page-badge ${hasError ? "badge-err" : "badge-ok"}">
-            ${hasError ? `⚠ ${issueCount} ${issueCount === 1 ? "erro" : "erros"}` : "✓ OK"}
-          </span>
+          <span class="page-badge ${hasError ? "badge-err" : "badge-ok"}">${hasError ? `⚠ ${issueCount} ${issueCount === 1 ? "erro" : "erros"}` : "✓ OK"}</span>
         </div>
-        <div class="page-content">
-          ${isPageErr
-            ? `<div class="page-error-msg">${esc((r.issues.find(i => i.rule === "page_error") || {}).message || "Erro ao carregar a página.")}</div>`
-            : renderHeadingTree(r, filter)
-          }
-        </div>
+        <div class="page-content">${isPageErr
+          ? `<div class="page-error-msg">${esc((r.issues.find(i => i.rule === "page_error") || {}).message || "Erro ao carregar a página.")}</div>`
+          : renderHeadingTree(r, filter)
+        }</div>
       </div>`;
   }).join("");
 
   const moreHtml = remaining > 0
-    ? `<button class="show-all-btn" data-job-show-all="${esc(jobId)}" type="button">
-        Ver todas as páginas (mais ${remaining})
-       </button>`
+    ? `<button class="show-all-btn" data-job-show-all="${esc(jobId)}" type="button">Ver todas as páginas (mais ${remaining})</button>`
     : "";
 
   return pagesHtml + moreHtml;
 }
 
-// Renders the body of a single job card
 function renderJobBody(job) {
   const result = job.result;
 
@@ -240,12 +214,9 @@ function renderJobBody(job) {
     let html = `<div style="font-size:12px;color:var(--muted);font-family:var(--mono);padding:4px 0">${esc(progress.message || "A aguardar...")}</div>`;
     if (job.state === "a_correr" && partialReports.length > 0) {
       const partialCount = progress.partial_pages_with_issues || partialReports.length;
-      html += `
-        <div class="pages-header" style="margin-top: 12px; margin-bottom: 6px;">
+      html += `<div class="pages-header" style="margin-top:12px;margin-bottom:6px;">
           <span class="pages-header-title">Erros encontrados até agora (${partialCount})</span>
-        </div>
-        ${renderPagesList(job, partialReports)}
-      `;
+        </div>${renderPagesList(job, partialReports)}`;
     }
     return html;
   }
@@ -253,46 +224,29 @@ function renderJobBody(job) {
   const reports = result.reports || [];
   const pagesCrawled = result.pages_crawled || 0;
   const pagesWithErrors = result.pages_with_issues || 0;
-  const pagesOk = pagesCrawled - pagesWithErrors;
   const jobId = job.id;
   const filter = jobFilters[jobId] || "all";
-
-  const summaryHtml = `
-    <div class="summary">
-      <div class="s-card">
-        <div class="s-num">${pagesCrawled}</div>
-        <div class="s-label">Páginas</div>
-      </div>
-      <div class="s-card">
-        <div class="s-num red">${pagesWithErrors}</div>
-        <div class="s-label">Com erros</div>
-      </div>
-      <div class="s-card">
-        <div class="s-num green">${pagesOk}</div>
-        <div class="s-label">Sem erros</div>
-      </div>
-    </div>`;
-
   const isSinglePage = pagesCrawled <= 1;
 
-  const filterRowHtml = isSinglePage ? `
-    <div class="pages-header">
-      <span class="pages-header-title">Página auditada</span>
-    </div>` : `
-    <div class="pages-header">
-      <span class="pages-header-title">Páginas auditadas</span>
-      <div class="filter-row">
-        <button class="filter-btn${filter === "all" ? " active" : ""}" data-job-filter="${esc(jobId)}" data-filter-val="all">Todas</button>
-        <button class="filter-btn${filter === "errors" ? " active" : ""}" data-job-filter="${esc(jobId)}" data-filter-val="errors">Só erros</button>
-      </div>
-    </div>`;
+  const summaryHtml = `<div class="summary">
+    <div class="s-card"><div class="s-num">${pagesCrawled}</div><div class="s-label">Páginas</div></div>
+    <div class="s-card"><div class="s-num red">${pagesWithErrors}</div><div class="s-label">Com erros</div></div>
+    <div class="s-card"><div class="s-num green">${pagesCrawled - pagesWithErrors}</div><div class="s-label">Sem erros</div></div>
+  </div>`;
 
-  const pagesHtml = renderPagesList(job, reports);
+  const filterRowHtml = isSinglePage
+    ? `<div class="pages-header"><span class="pages-header-title">Página auditada</span></div>`
+    : `<div class="pages-header">
+        <span class="pages-header-title">Páginas auditadas</span>
+        <div class="filter-row">
+          <button class="filter-btn${filter === "all" ? " active" : ""}" data-job-filter="${esc(jobId)}" data-filter-val="all">Todas</button>
+          <button class="filter-btn${filter === "errors" ? " active" : ""}" data-job-filter="${esc(jobId)}" data-filter-val="errors">Só erros</button>
+        </div>
+      </div>`;
 
-  return summaryHtml + filterRowHtml + pagesHtml;
+  return summaryHtml + filterRowHtml + renderPagesList(job, reports);
 }
 
-// Renders all visible jobs into the jobs list
 function renderJobs(allJobs) {
   const visible = allJobs.filter(j => !hiddenJobIds.has(j.id));
   if (!visible.length) {
@@ -306,17 +260,14 @@ function renderJobs(allJobs) {
     const hasTotal = (progress.total || 0) > 0;
     const isRunning = job.state === "a_correr";
     const isIndeterminate = isRunning && !hasTotal;
-    const progressLabel = hasTotal ? `${pct}%` : `${progress.current || 0} páginas`;
     const isDone = ["concluida", "erro", "cancelada"].includes(job.state);
     const canCancel = ["pendente", "a_correr"].includes(job.state);
-    const statusMsg = buildProgressMsg(job);
-
-    return `
-      <article class="job" data-job-id="${esc(job.id)}">
+    const progressLabel = hasTotal ? `${pct}%` : `${progress.current || 0} páginas`;
+    return `<article class="job" data-job-id="${esc(job.id)}">
         <div class="job-head">
           <div class="job-left">
             <div class="job-title">${esc(job.title)}</div>
-            <div class="job-meta">${esc(statusMsg)}</div>
+            <div class="job-meta">${esc(buildProgressMsg(job))}</div>
           </div>
           <div class="job-right">
             <span class="status estado-${esc(job.state)}">${esc(job.state.replaceAll("_", " "))}</span>
@@ -328,13 +279,10 @@ function renderJobs(allJobs) {
           <div class="progress-label">${esc(progressLabel)}</div>
           <div class="progress${isIndeterminate ? " indeterminate" : ""}"><div style="width:${isIndeterminate ? 100 : pct}%"></div></div>
         </div>
-        <div class="job-body">
-          ${renderJobBody(job)}
-        </div>
+        <div class="job-body">${renderJobBody(job)}</div>
       </article>`;
   }).join("");
 
-  // Copy URL button handlers
   jobsListEl.querySelectorAll("[data-copy-url]").forEach(btn => {
     btn.addEventListener("click", async (e) => {
       e.stopPropagation();
@@ -345,7 +293,6 @@ function renderJobs(allJobs) {
     });
   });
 
-  // Show-all button handlers
   jobsListEl.querySelectorAll("[data-job-show-all]").forEach(btn => {
     btn.addEventListener("click", () => {
       const jid = btn.dataset.jobShowAll;
@@ -360,7 +307,6 @@ function renderJobs(allJobs) {
     });
   });
 
-  // Cancel button handlers
   jobsListEl.querySelectorAll("[data-cancel]").forEach(btn => {
     btn.addEventListener("click", async () => {
       try {
@@ -371,7 +317,6 @@ function renderJobs(allJobs) {
     });
   });
 
-  // Close/dismiss button handlers
   jobsListEl.querySelectorAll("[data-close]").forEach(btn => {
     btn.addEventListener("click", async () => {
       const jid = btn.dataset.close;
@@ -381,12 +326,17 @@ function renderJobs(allJobs) {
       delete jobShowAll[jid];
       const el = jobsListEl.querySelector(`[data-job-id="${CSS.escape(jid)}"]`);
       if (el) el.remove();
-      if (!jobsListEl.querySelector(".job"))
-        jobsListEl.innerHTML = `<div class="empty">Ainda não há auditorias.</div>`;
+      if (!jobsListEl.querySelector(".job")) {
+        try {
+          const hist = await fetchJson("/api/historico?limite=20");
+          renderHistorico(hist.runs || []);
+        } catch (_) {
+          jobsListEl.innerHTML = `<div class="empty">Ainda não há auditorias.</div>`;
+        }
+      }
     });
   });
 
-  // Filter toggle handlers — re-render only the affected job body
   jobsListEl.querySelectorAll("[data-job-filter]").forEach(btn => {
     btn.addEventListener("click", () => {
       const jid = btn.dataset.jobFilter;
@@ -401,20 +351,17 @@ function renderJobs(allJobs) {
     });
   });
 
-  // Page expand/collapse handlers
   jobsListEl.querySelectorAll("[data-toggle-page]").forEach(el => {
     el.addEventListener("click", () => togglePage(el.dataset.togglePage, jobsListEl));
   });
 }
 
-// Toggles a page item open/closed
 function togglePage(key, container) {
   openPages[key] = !openPages[key];
   const item = container.querySelector(`[data-page-key="${CSS.escape(key)}"]`);
   if (item) item.classList.toggle("open", !!openPages[key]);
 }
 
-// Re-attaches interactivity after a partial re-render
 function attachInteractivity(container) {
   container.querySelectorAll("[data-toggle-page]").forEach(el => {
     el.addEventListener("click", () => togglePage(el.dataset.togglePage, container));
@@ -427,12 +374,9 @@ function attachInteractivity(container) {
   });
 }
 
-// Returns a human-readable progress message for a job
 function buildProgressMsg(job) {
   const p = job.progress || {};
-  if (job.state === "concluida" && job.result) {
-    return "";
-  }
+  if (job.state === "concluida" && job.result) return "";
   if (p.phase === "crawl" || p.phase === "analise") {
     const current = p.current || 0;
     const total = p.total || 0;
@@ -443,7 +387,6 @@ function buildProgressMsg(job) {
   return p.message || "A aguardar...";
 }
 
-// Renders the saved reports list
 function renderReports(reports) {
   if (!reports.length) {
     reportsListEl.innerHTML = `<div class="empty">Nenhum relatório guardado.</div>`;
@@ -457,6 +400,7 @@ function renderReports(reports) {
       </div>
       <div class="report-actions">
         <a class="btn btn-secondary" href="${esc(r.url)}" target="_blank">Abrir</a>
+        <a class="btn btn-secondary" href="${esc(r.url)}" download="${esc(r.name)}">Descarregar</a>
         <button class="btn btn-secondary" type="button" data-rename-report="${esc(r.name)}">Renomear</button>
         <button class="btn btn-danger"    type="button" data-delete-report="${esc(r.name)}">Apagar</button>
       </div>
@@ -471,7 +415,7 @@ function renderReports(reports) {
   reportsListEl.querySelectorAll("[data-rename-report]").forEach(btn => {
     btn.addEventListener("click", () => {
       const row = reportsListEl.querySelector(`[data-rename-row="${CSS.escape(btn.dataset.renameReport)}"]`);
-      if (row) { row.classList.toggle("open"); if (row.classList.contains("open")) row.querySelector("input").select(); }
+      if (row) { row.classList.add("open"); row.querySelector("input").select(); }
     });
   });
 
@@ -488,7 +432,7 @@ function renderReports(reports) {
           body: JSON.stringify({ new_name: newName }),
         });
         showToast("Relatório renomeado.");
-        await refreshReports({ silent: true });
+        await refreshReports({ silent: true, force: true });
       } catch (e) { showToast(e.message, true); }
     });
   });
@@ -506,24 +450,28 @@ function renderReports(reports) {
       try {
         await fetchJson(`/api/relatorios/${encodeURIComponent(btn.dataset.deleteReport)}`, { method: "DELETE" });
         showToast("Relatório apagado.");
-        await refreshReports({ silent: true });
+        await refreshReports({ silent: true, force: true });
       } catch (e) { showToast(e.message, true); }
     });
   });
 }
 
-reportsRefreshBtn.addEventListener("click", () => refreshReports());
+reportsRefreshBtn.addEventListener("click", () => refreshReports({ force: true }));
 reportsDeleteAllBtn.addEventListener("click", async () => {
   if (!confirm("Apagar todos os relatórios guardados?")) return;
   try {
     const data = await fetchJson("/api/relatorios", { method: "DELETE" });
     showToast(`${data.deleted || 0} relatórios apagados.`);
-    await refreshReports({ silent: true });
+    await refreshReports({ silent: true, force: true });
   } catch (e) { showToast(e.message, true); }
 });
 
-// Fetches and re-renders the reports list
-async function refreshReports({ silent = false } = {}) {
+function isRenameOpen() {
+  return !!reportsListEl.querySelector(".report-rename-row.open");
+}
+
+async function refreshReports({ silent = false, force = false } = {}) {
+  if (!force && isRenameOpen()) return;
   try {
     const data = await fetchJson("/api/relatorios");
     renderReports(data.reports || []);
@@ -533,14 +481,62 @@ async function refreshReports({ silent = false } = {}) {
   }
 }
 
-// Fetches and re-renders the jobs list; returns true if any job is still active
+function renderHistorico(runs) {
+  if (!runs.length) {
+    jobsListEl.innerHTML = `<div class="empty">Ainda não há auditorias.</div>`;
+    return;
+  }
+  jobsListEl.innerHTML = runs.map(run => {
+    const tipoLabel = run.tipo === "pagina" ? "Página única" : "Site inteiro";
+    const meta = [
+      run.terminado_em ? formatDate(run.terminado_em) : null,
+      run.total_paginas != null ? `${run.total_paginas} página(s)` : null,
+      run.paginas_com_erros ? `${run.paginas_com_erros} com problemas` : "sem problemas",
+      run.tempo_total_s != null ? `${Number(run.tempo_total_s).toFixed(1)}s` : null,
+    ].filter(Boolean).join(" · ");
+    return `<article class="job" data-hist-id="${esc(run.id)}">
+        <div class="job-head">
+          <div class="job-left">
+            <div class="job-title">${esc(tipoLabel + ": " + run.url)}</div>
+            <div class="job-meta">${esc(meta)}</div>
+          </div>
+          <div class="job-right">
+            <span class="status estado-concluida">histórico</span>
+            <button class="job-close" data-delete-hist="${esc(run.id)}" type="button" title="Remover do histórico">×</button>
+          </div>
+        </div>
+      </article>`;
+  }).join("");
+
+  jobsListEl.querySelectorAll("[data-delete-hist]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const rid = btn.dataset.deleteHist;
+      try { await fetchJson(`/api/historico/${rid}`, { method: "DELETE" }); } catch (_) {}
+      const el = jobsListEl.querySelector(`[data-hist-id="${CSS.escape(rid)}"]`);
+      if (el) el.remove();
+      if (!jobsListEl.querySelector(".job"))
+        jobsListEl.innerHTML = `<div class="empty">Ainda não há auditorias.</div>`;
+    });
+  });
+}
+
 async function refreshJobs({ silent = false } = {}) {
   try {
     const data    = await fetchJson("/api/jobs");
     const allJobs = data.jobs || [];
-    renderJobs(allJobs);
-    await refreshReports({ silent: true });
-    return allJobs.some(j => ["pendente", "a_correr"].includes(j.state) && !hiddenJobIds.has(j.id));
+    const visible = allJobs.filter(j => !hiddenJobIds.has(j.id));
+    const hasActive = allJobs.some(j => ["pendente", "a_correr"].includes(j.state) && !hiddenJobIds.has(j.id));
+    if (visible.length) {
+      renderJobs(allJobs);
+    } else {
+      try {
+        const hist = await fetchJson("/api/historico?limite=20");
+        renderHistorico(hist.runs || []);
+      } catch (_) {
+        jobsListEl.innerHTML = `<div class="empty">Ainda não há auditorias.</div>`;
+      }
+    }
+    return hasActive;
   } catch (e) {
     if (!silent) showToast(e.message, true);
     jobsListEl.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
@@ -548,21 +544,12 @@ async function refreshJobs({ silent = false } = {}) {
   }
 }
 
-// Schedules the next poll; faster interval when jobs are active
-let _pollTimer = null;
-function schedulePolling(fast = false) {
-  clearTimeout(_pollTimer);
-  _pollTimer = setTimeout(async () => {
-    const hasActive = await refreshJobs({ silent: true });
-    schedulePolling(hasActive);
-  }, fast ? 2500 : 9000);
-}
-
-// Entry point
 (async function init() {
   setMode("single");
-  await refreshReports({ silent: true });
-  const hasActive = await refreshJobs({ silent: true });
+  const [hasActive] = await Promise.all([
+    refreshJobs({ silent: true }),
+    refreshReports({ silent: true, force: true }),
+  ]);
   schedulePolling(hasActive);
 })();
 

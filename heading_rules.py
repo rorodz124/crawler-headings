@@ -1,11 +1,14 @@
 from __future__ import annotations
 from config import AuditConfig
 
+
 def _has_content(h: dict) -> bool:
     return bool((h.get("text") or "").strip()) or bool(h.get("hasImage"))
 
+
 def _is_empty(h: dict) -> bool:
     return not _has_content(h)
+
 
 def validate_headings(page_data: dict, audit_config: AuditConfig) -> dict:
     raw = page_data.get("headings", [])
@@ -28,7 +31,7 @@ def validate_headings(page_data: dict, audit_config: AuditConfig) -> dict:
     considered = [h for h in headings if h["visible"] or not audit_config.validate_visible_only]
     issues = []
 
-    # Regra — h1 único
+    # Rule — single h1
     h1s = [h for h in considered if h["level"] == 1]
     h1_count = len(h1s)
 
@@ -42,7 +45,7 @@ def validate_headings(page_data: dict, audit_config: AuditConfig) -> dict:
         if _is_empty(h):
             issues.append({"rule": "empty_h1", "message": "h1 vazio — não tem texto nem imagem. O h1 deve identificar o conteúdo da página.", "heading_index": h["index"]})
 
-    # Regra — hierarquia
+    # Rule — heading hierarchy
     prev_level: int | None = None
     for h in considered:
         level, tag = h["level"], h["tag"]
@@ -51,7 +54,7 @@ def validate_headings(page_data: dict, audit_config: AuditConfig) -> dict:
             issues.append({"rule": "empty_heading", "message": f"{tag} vazio — o heading não tem texto nem imagem.", "heading_index": h["index"]})
 
         if prev_level is None:
-            if level > 1 and h1_count > 0:
+            if level > 1:
                 missing = " → ".join(f"h{n}" for n in range(1, level))
                 issues.append({"rule": "starts_too_deep", "message": f"A estrutura de headings começa em {tag} sem {missing} antes.", "heading_index": h["index"]})
         elif level - prev_level > 1:

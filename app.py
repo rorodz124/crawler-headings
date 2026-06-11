@@ -15,24 +15,26 @@ from config import AuditConfig, CrawlConfig
 from crawler import crawl_site
 from reporting import make_report_basename, write_html_report, write_json_report
 
-BASE_DIR = Path(__file__).resolve().parent
-UI_FILE  = BASE_DIR / "headings_app.html"
-JS_FILE  = BASE_DIR / "headings_app.js"
+BASE_DIR    = Path(__file__).resolve().parent
+UI_FILE     = BASE_DIR / "headings_app.html"
+JS_FILE     = BASE_DIR / "headings_app.js"
 REPORTS_DIR = BASE_DIR / "relatorios_headings"
 
 MAX_JOBS = 20
 MAX_LOGS = 120
-WORKERS = 6
+WORKERS  = 6
 
 app = Flask(__name__)
 CORS(app)
+db.initialize()
+
 
 class JobManager:
     def __init__(self):
         self._jobs = {}
         self._lock = threading.Lock()
 
-    def _snapshot(self, job):
+    def _snapshot(self, job: dict) -> dict:
         return {
             "id":               job["id"],
             "type":             job["type"],
@@ -49,7 +51,7 @@ class JobManager:
             "run_id":           job.get("run_id"),
         }
 
-    def create(self, job_type, title):
+    def create(self, job_type: str, title: str) -> dict:
         job_id = uuid.uuid4().hex[:10]
         job = {
             "id":               job_id,
@@ -73,23 +75,22 @@ class JobManager:
             self._jobs[job_id] = job
         return self._snapshot(job)
 
-    def list_all(self):
+    def list_all(self) -> list[dict]:
         with self._lock:
             items = [self._snapshot(j) for j in self._jobs.values()]
         items.sort(key=lambda j: j["created_at"], reverse=True)
         return items
 
-    def get(self, job_id):
+    def get(self, job_id: str) -> dict | None:
         with self._lock:
             j = self._jobs.get(job_id)
             return self._snapshot(j) if j else None
 
-    def delete(self, job_id):
+    def delete(self, job_id: str) -> bool:
         with self._lock:
-            removed = self._jobs.pop(job_id, None)
-        return removed is not None
+            return self._jobs.pop(job_id, None) is not None
 
-    def cancel(self, job_id):
+    def cancel(self, job_id: str) -> dict | None:
         with self._lock:
             j = self._jobs.get(job_id)
             if not j:
@@ -99,14 +100,10 @@ class JobManager:
             if j["state"] == "pendente":
                 j["state"]       = "cancelada"
                 j["finished_at"] = datetime.utcnow().isoformat() + "Z"
-                j["progress"]    = {
-                    "phase":      "cancelada",
-                    "message":    "Tarefa cancelada antes de arrancar.",
-                    "percentage": j["progress"].get("percentage", 0),
-                }
+                j["progress"]    = {**j["progress"], "phase": "cancelada", "message": "Tarefa cancelada antes de arrancar."}
             return self._snapshot(j)
 
-    def _mark_running(self, job_id):
+    def _mark_running(self, job_id: str) -> bool:
         with self._lock:
             j = self._jobs[job_id]
             if j["cancel_requested"] or j["state"] == "cancelada":
@@ -116,27 +113,25 @@ class JobManager:
             j["logs"].append("Tarefa iniciada.")
             return True
 
-    def add_log(self, job_id, message):
+    def add_log(self, job_id: str, message: str) -> None:
         with self._lock:
             j = self._jobs.get(job_id)
             if j:
                 j["logs"].append(message)
 
-    def update_progress(self, job_id, payload):
+    def update_progress(self, job_id: str, payload: dict) -> None:
         with self._lock:
             j = self._jobs.get(job_id)
             if not j:
                 return
-            p = dict(j["progress"])
-            p.update(payload)
-            total = p.get("total")
-            if total:
-                p["percentage"] = int(max(0, min(100, (p.get("current") or 0) * 100 / total)))
+            p = {**j["progress"], **payload}
+            if p.get("total"):
+                p["percentage"] = int(max(0, min(100, (p.get("current") or 0) * 100 / p["total"])))
             j["progress"] = p
             if payload.get("message"):
                 j["logs"].append(payload["message"])
 
-    def mark_done(self, job_id, result, run_id=None):
+    def mark_done(self, job_id: str, result: dict, run_id: str = None) -> None:
         with self._lock:
             j = self._jobs[job_id]
             j["state"]       = "concluida"
@@ -146,7 +141,7 @@ class JobManager:
             j["progress"]    = {**j["progress"], "phase": "concluida", "message": "Auditoria concluída.", "percentage": 100}
             j["logs"].append("Auditoria concluída.")
 
-    def mark_failed(self, job_id, error):
+    def mark_failed(self, job_id: str, error: str) -> None:
         with self._lock:
             j = self._jobs[job_id]
             state            = "cancelada" if j["cancel_requested"] else "erro"
@@ -156,13 +151,30 @@ class JobManager:
             j["progress"]    = {**j["progress"], "phase": state, "message": error}
             j["logs"].append(error)
 
+
 job_manager = JobManager()
 
-def _error_response(msg, status=400):
+
+def _error_response(msg: str, status: int = 400):
     return jsonify({"error": msg}), status
 
 
-def _resolve_report_path(name):
+def _validate_url(url: str) -> str | None:
+    from urllib.parse import urlparse
+    if not url:
+        return "Indica a URL."
+    try:
+        p = urlparse(url)
+    except Exception:
+        return "URL inválida."
+    if p.scheme not in ("http", "https"):
+        return "A URL deve começar por http:// ou https://."
+    if not p.netloc or "." not in p.netloc.lstrip("www."):
+        return "A URL não parece válida. Verifica o endereço introduzido."
+    return None
+
+
+def _resolve_report_path(name: str) -> Path:
     base   = REPORTS_DIR.resolve()
     target = (REPORTS_DIR / name).resolve()
     if not str(target).startswith(str(base) + os.sep) or target.suffix.lower() != ".html":
@@ -170,7 +182,7 @@ def _resolve_report_path(name):
     return target
 
 
-def _launch_job(job_type, title, runner):
+def _launch_job(job_type: str, title: str, runner) -> dict:
     job    = job_manager.create(job_type, title)
     job_id = job["id"]
 
@@ -178,41 +190,32 @@ def _launch_job(job_type, title, runner):
         if not job_manager._mark_running(job_id):
             return
 
-        partial_reports_with_errors = {}
-        partial_reports_lock = threading.Lock()
+        partial_errors      = {}
+        partial_errors_lock = threading.Lock()
 
         def on_progress(current, total, url, issue_count, timings, pages_with_issues=0, *args, **kwargs):
-            progress_message = (
+            msg = (
                 f"[{current}/{total}] {url} — {issue_count} problema(s)"
                 if total > 0
                 else f"[{current}] {url} — {issue_count} problema(s)"
             )
             report = kwargs.get("report")
-            if report and not report.get("valid") and report.get("issues"):
-                with partial_reports_lock:
-                    partial_reports_with_errors[report.get("url") or url] = report
-                    partial_reports_snapshot = sorted(
-                        partial_reports_with_errors.values(),
-                        key=lambda item: item.get("url") or "",
-                    )
-            else:
-                with partial_reports_lock:
-                    partial_reports_snapshot = sorted(
-                        partial_reports_with_errors.values(),
-                        key=lambda item: item.get("url") or "",
-                    )
+            with partial_errors_lock:
+                if report and not report.get("valid") and report.get("issues"):
+                    partial_errors[report.get("url") or url] = report
+                snapshot = sorted(partial_errors.values(), key=lambda r: r.get("url") or "")
 
             job_manager.update_progress(job_id, {
-                "phase":             "analise",
-                "message":           progress_message,
-                "current":           current,
-                "total":             total,
-                "pages_with_issues": pages_with_issues,
-                "partial_pages_with_issues": len(partial_reports_snapshot),
-                "partial_reports_with_errors": partial_reports_snapshot,
+                "phase":                       "analise",
+                "message":                     msg,
+                "current":                     current,
+                "total":                       total,
+                "pages_with_issues":           pages_with_issues,
+                "partial_pages_with_issues":   len(snapshot),
+                "partial_reports_with_errors": snapshot,
             })
 
-        def should_cancel():
+        def should_cancel() -> bool:
             j = job_manager.get(job_id)
             return bool(j and j["cancel_requested"])
 
@@ -235,48 +238,35 @@ def _launch_job(job_type, title, runner):
 
 def _job_response(factory):
     try:
-        job = factory()
+        return jsonify(factory()), 202
     except ValueError as exc:
         return _error_response(str(exc), 400)
-    return jsonify(job), 202
 
 
-def _run_audit(tipo, url, max_pages, on_progress, should_cancel):
-    """Runs crawl_site, persists to DB, returns (result, run_id)."""
+def _run_audit(run_type: str, url: str, max_pages: int, on_progress, should_cancel):
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    # Página única não beneficia de workers paralelos — 1 basta e poupa recursos.
-    effective_workers = 1 if max_pages == 1 else WORKERS
     crawl_config = CrawlConfig(
         max_pages=max_pages,
-        crawler_workers=effective_workers,
+        crawler_workers=1 if max_pages == 1 else WORKERS,
     )
-    audit_config = AuditConfig(
-        validate_visible_only=True,
-        report_dir=str(REPORTS_DIR),
-    )
-    iniciado_em = datetime.utcnow().isoformat() + "Z"
-    result = crawl_site(
-        url,
-        crawl_config,
-        audit_config,
-        on_progress=on_progress,
-        should_cancel=should_cancel,
-    )
+    audit_config = AuditConfig(validate_visible_only=True)
+    started_at = datetime.utcnow().isoformat() + "Z"
+    result = crawl_site(url, crawl_config, audit_config, on_progress=on_progress, should_cancel=should_cancel)
 
     if should_cancel():
         return result, None
 
     if max_pages != 1:
         try:
-            report_basename = make_report_basename(result)
-            write_html_report(result, str(REPORTS_DIR), basename=report_basename)
-            write_json_report(result, str(REPORTS_DIR), basename=report_basename)
+            basename = make_report_basename(result)
+            write_html_report(result, str(REPORTS_DIR), basename=basename)
+            write_json_report(result, str(REPORTS_DIR), basename=basename)
         except Exception:
             pass
 
     run_id = None
     try:
-        run_id = db.guardar_run(tipo=tipo, url=url, resultado=result, iniciado_em=iniciado_em)
+        run_id = db.save_run(run_type=run_type, url=url, result=result, started_at=started_at)
     except Exception as exc:
         print(f"[DB] Não foi possível guardar histórico: {exc}")
 
@@ -388,39 +378,33 @@ def delete_report(name):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/historico")
-def list_historico():
-    """Returns the list of past runs stored in the DB."""
+def list_history():
     try:
-        limite = min(int(request.args.get("limite", 100)), 500)
-        runs   = db.listar_runs(limite=limite)
-        return jsonify({"runs": runs})
+        limit = min(int(request.args.get("limite", 100)), 500)
+        return jsonify({"runs": db.list_runs(limit=limit)})
     except Exception as exc:
         return _error_response(str(exc), 500)
 
 
 @app.get("/api/historico/<run_id>")
-def get_historico(run_id):
-    """Returns full detail of a run: pages + issues."""
-    run = db.obter_run(run_id)
+def get_history(run_id):
+    run = db.get_run(run_id)
     if not run:
         return _error_response("Run não encontrada.", 404)
     return jsonify(run)
 
 
 @app.delete("/api/historico/<run_id>")
-def delete_historico(run_id):
-    """Deletes a single run and all associated data."""
-    run = db.obter_run(run_id)
-    if not run:
+def delete_history(run_id):
+    if not db.get_run(run_id):
         return _error_response("Run não encontrada.", 404)
-    db.apagar_run(run_id)
+    db.delete_run(run_id)
     return jsonify({"deleted": run_id})
 
 
 @app.delete("/api/historico")
-def delete_all_historico():
-    """Deletes the entire history."""
-    db.apagar_todos_runs()
+def delete_all_history():
+    db.delete_all_runs()
     return jsonify({"deleted": "all"})
 
 
@@ -469,8 +453,9 @@ def cancel_job(job_id):
 def create_page_job():
     data = request.get_json(silent=True) or {}
     url  = (data.get("url") or "").strip()
-    if not url:
-        return _error_response("Indica a URL da página.")
+    err  = _validate_url(url)
+    if err:
+        return _error_response(err)
     return _job_response(lambda: _launch_job(
         "pagina", f"Página: {url}",
         lambda p, sc: _run_audit("pagina", url, max_pages=1, on_progress=p, should_cancel=sc),
@@ -482,8 +467,9 @@ def create_site_job():
     data      = request.get_json(silent=True) or {}
     url       = (data.get("url") or "").strip()
     max_pages = int(data.get("max_paginas") or 0)
-    if not url:
-        return _error_response("Indica a URL base do site.")
+    err = _validate_url(url)
+    if err:
+        return _error_response(err)
     return _job_response(lambda: _launch_job(
         "site", f"Site: {url}",
         lambda p, sc: _run_audit("site", url, max_pages=max_pages, on_progress=p, should_cancel=sc),

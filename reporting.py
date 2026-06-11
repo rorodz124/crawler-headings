@@ -7,92 +7,41 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-def on_progress(current, total, url, issue_count, timings, *args, **kwargs):
-    page_total = timings.get("page_total_seconds", 0.0) if isinstance(timings, dict) else 0.0
-    load = timings.get("load_seconds", 0.0) if isinstance(timings, dict) else 0.0
-    headings = timings.get("headings_seconds", 0.0) if isinstance(timings, dict) else 0.0
-    links = timings.get("links_seconds", 0.0) if isinstance(timings, dict) else 0.0
-    print(
-        f"[{current}/{total}] {url} | problemas: {issue_count} | "
-        f"tempo={page_total:.3f}s "
-        f"(load={load:.3f}s, headings={headings:.3f}s, links={links:.3f}s)"
-    )
-    
-    # Se houver problemas, imprime-os imediatamente
-    report = kwargs.get("report")
-    if report and not report.get("valid") and report.get("issues"):
-        for issue in report["issues"]:
-            print(f"  -> [{issue['rule']}] {issue['message']}")
-
-
-def print_summary(result: dict) -> None:
-    timings = result.get("timings", {})
-    print()
-    print(f"Paginas analisadas: {result['pages_crawled']}")
-    print(f"Paginas com problemas: {result['pages_with_issues']}")
-    if timings.get("total_elapsed_seconds") is not None:
-        print(f"Tempo total: {timings['total_elapsed_seconds']:.2f}s")
-
-    invalid = [r for r in result["reports"] if not r["valid"]]
-    if not invalid:
-        print("Nenhum problema de headings encontrado.")
-        return
-
-    print()
-    print("Paginas com problemas:")
-    for report in invalid:
-        print(f"- {report['url']}")
-        for issue in report["issues"]:
-            print(f"  [{issue['rule']}] {issue['message']}")
-        if report.get("timings"):
-            t = report["timings"]
-            print(f"  tempo={t['page_total_seconds']:.3f}s  load={t['load_seconds']:.3f}s  headings={t['headings_seconds']:.3f}s  links={t['links_seconds']:.3f}s")
-
-
 def make_report_basename(result: dict) -> str:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    return _report_basename(result, timestamp=timestamp)
+    base_url = result.get("base_url") or "auditoria"
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", base_url).strip("_").lower()[:70] or "auditoria"
+    return f"relatorio_headings_{slug}_{timestamp}"
 
 
 def write_json_report(result: dict, report_dir: str, basename: str | None = None) -> Path:
-    destination = Path(report_dir)
-    destination.mkdir(parents=True, exist_ok=True)
-    output_path = destination / f"{basename or make_report_basename(result)}.json"
+    dest = Path(report_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+    output_path = dest / f"{basename or make_report_basename(result)}.json"
     output_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return output_path
 
 
 def write_html_report(result: dict, report_dir: str, basename: str | None = None) -> Path:
-    destination = Path(report_dir)
-    destination.mkdir(parents=True, exist_ok=True)
-    output_path = destination / f"{basename or make_report_basename(result)}.html"
+    dest = Path(report_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+    output_path = dest / f"{basename or make_report_basename(result)}.html"
     output_path.write_text(_render_html_report(result), encoding="utf-8")
     return output_path
 
 
-def _report_basename(result: dict, timestamp: str) -> str:
-    base_url = result.get("base_url") or "auditoria"
-    slug = re.sub(r"[^a-zA-Z0-9]+", "_", base_url).strip("_").lower()
-    slug = slug[:70] or "auditoria"
-    return f"relatorio_headings_{slug}_{timestamp}"
-
-
 def _render_html_report(result: dict) -> str:
-    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    generated_at = datetime.now(timezone.utc).strftime("%d/%m/%Y às %H:%M")
     reports = result.get("reports") or []
     pages_crawled = result.get("pages_crawled") or len(reports)
     pages_with_issues = result.get("pages_with_issues") or 0
     pages_ok = max(0, pages_crawled - pages_with_issues)
     total_issues = sum(len(report.get("issues") or []) for report in reports)
     timings = result.get("timings") or {}
-
-    page_sections = "\n".join(_render_page(report) for report in reports)
-    if not page_sections:
-        page_sections = '<p class="empty">Nenhuma pagina foi analisada.</p>'
-
     elapsed = timings.get("total_elapsed_seconds", "-")
-    avg     = timings.get("average_page_seconds", "-")
-    pps     = timings.get("pages_per_second", "-")
+    avg = timings.get("average_page_seconds", "-")
+
+    page_sections = "\n".join(_render_page(report) for report in reports) or '<p class="empty">Nenhuma pagina foi analisada.</p>'
 
     return f"""<!DOCTYPE html>
 <html lang="pt">
@@ -157,7 +106,6 @@ def _render_html_report(result: dict) -> str:
     .h-text{{flex:1;font-size:12px;word-break:break-word}}
     .h-text.empty-text{{color:var(--muted);font-style:italic}}
     .h-issues{{display:flex;flex-direction:column;gap:3px;flex-shrink:0}}
-    .source{{font-size:11px;color:var(--muted);margin-left:6px}}
     .empty{{color:var(--muted);font-style:italic;padding:6px 0;font-size:12px}}
     #emptyFilterMsg{{display:none;color:var(--muted);font-style:italic;padding:8px 0;font-size:12px}}
     @media(max-width:700px){{
@@ -182,7 +130,7 @@ def _render_html_report(result: dict) -> str:
     </div>
 
     <div class="timings-bar">
-      Tempo total: {escape(str(elapsed))}s &nbsp;-&nbsp; Media por pagina: {escape(str(avg))}s &nbsp;-&nbsp; Paginas/s: {escape(str(pps))}
+      Tempo total: {escape(str(elapsed))}s &nbsp;-&nbsp; Media por pagina: {escape(str(avg))}s
     </div>
 
     <div class="pages-header">
@@ -196,7 +144,6 @@ def _render_html_report(result: dict) -> str:
     {page_sections}
   </main>
   <script>
-    // Filter buttons
     const filterBtns = document.querySelectorAll("[data-filter]");
     const pageItems  = Array.from(document.querySelectorAll(".page-item"));
     const emptyMsg   = document.getElementById("emptyFilterMsg");
@@ -214,7 +161,6 @@ def _render_html_report(result: dict) -> str:
 
     filterBtns.forEach(b => b.addEventListener("click", () => applyFilter(b.dataset.filter)));
 
-    // Page expand/collapse
     document.querySelectorAll(".page-item-head").forEach(head => {{
       head.addEventListener("click", e => {{
         if (e.target.closest(".copy-url-btn")) return;
@@ -222,7 +168,6 @@ def _render_html_report(result: dict) -> str:
       }});
     }});
 
-    // Copy URL buttons
     document.querySelectorAll(".copy-url-btn").forEach(btn => {{
       btn.addEventListener("click", async e => {{
         e.stopPropagation();
@@ -246,22 +191,16 @@ def _render_page(report: dict) -> str:
     valid = report.get("valid")
     badge_class = "badge-ok" if valid else "badge-err"
     badge_text = "✓ OK" if valid else f"⚠ {len(issues)} {'erro' if len(issues) == 1 else 'erros'}"
-    issues_html = "\n".join(_render_issue(issue) for issue in issues)
-    if not issues_html:
-        issues_html = '<p class="empty">Nenhum problema encontrado nesta pagina.</p>'
+    issues_html = "\n".join(_render_issue(issue) for issue in issues) or '<p class="empty">Nenhum problema encontrado nesta pagina.</p>'
     issues_by_heading = _issues_by_heading(issues)
-    headings_html = "\n".join(_render_heading(heading, issues_by_heading) for heading in headings)
-    if not headings_html:
-        headings_html = '<p class="empty">Nenhum heading considerado.</p>'
-    page_class = "page-item has-issues" if not valid else "page-item"
-    is_valid = "true" if valid else "false"
-    # Pages with issues start open
-    open_class = " open" if not valid else ""
+    headings_html = "\n".join(_render_heading(h, issues_by_heading) for h in headings) or '<p class="empty">Nenhum heading considerado.</p>'
     url = report.get("url") or ""
     title = report.get("title") or "-"
+    page_class = "page-item has-issues" if not valid else "page-item"
+    open_class = " open" if not valid else ""
 
     return f"""
-      <div class="{page_class}{open_class}" data-valid="{is_valid}">
+      <div class="{page_class}{open_class}" data-valid="{'true' if valid else 'false'}">
         <div class="page-item-head">
           <span class="page-chevron">▶</span>
           <span class="page-url" title="{escape(url)}">{escape(url)}</span>
@@ -282,23 +221,19 @@ def _render_page(report: dict) -> str:
 def _render_issue(issue: dict) -> str:
     rule = _issue_label(issue)
     issue_class = "issue-label warn" if issue.get("rule") in {"hierarchy_skip", "starts_too_deep"} else "issue-label"
-    message = issue.get("message") or ""
-    return f'<div class="issue"><span class="{issue_class}">{escape(rule)}</span><span>{escape(message)}</span></div>'
+    return f'<div class="issue"><span class="{issue_class}">{escape(rule)}</span><span>{escape(issue.get("message") or "")}</span></div>'
 
 
 def _render_heading(heading: dict, issues_by_heading: dict[int, list[dict]]) -> str:
     level = int(heading.get("level") or 1)
     indent = max(0, level - 1) * 18
-    has_image = heading.get("hasImage", False)
     text = heading.get("text") or ""
-    # Heading com imagem e sem texto: mostrar label descritivo em vez de vazio
-    if has_image and not text:
+    if heading.get("hasImage") and not text:
         text = f'{heading.get("tag")} com imagem'
     elif not text:
         text = "(heading vazio)"
-    source = ""
     heading_issues = issues_by_heading.get(heading.get("index"), [])
-    issue_badges = "".join(_render_heading_issue_badge(issue) for issue in heading_issues)
+    issue_badges = "".join(_render_heading_issue_badge(i) for i in heading_issues)
     issues_html = f'<div class="h-issues">{issue_badges}</div>' if issue_badges else ""
     row_class = "h-row h-error" if heading_issues else "h-row"
     text_class = "h-text empty-text" if heading.get("is_empty") else "h-text"
@@ -306,7 +241,7 @@ def _render_heading(heading: dict, issues_by_heading: dict[int, list[dict]]) -> 
         f'<div class="{row_class}">'
         f'<span style="width:{indent}px;flex-shrink:0"></span>'
         f'<span class="h-tag {escape(heading.get("tag") or "")}">{escape(heading.get("tag") or "")}</span>'
-        f'<span class="{text_class}">{escape(text)}{source}</span>'
+        f'<span class="{text_class}">{escape(text)}</span>'
         f'{issues_html}'
         f'</div>'
     )
@@ -315,10 +250,9 @@ def _render_heading(heading: dict, issues_by_heading: dict[int, list[dict]]) -> 
 def _issues_by_heading(issues: list[dict]) -> dict[int, list[dict]]:
     grouped: dict[int, list[dict]] = {}
     for issue in issues:
-        heading_index = issue.get("heading_index")
-        if heading_index is None:
-            continue
-        grouped.setdefault(heading_index, []).append(issue)
+        idx = issue.get("heading_index")
+        if idx is not None:
+            grouped.setdefault(idx, []).append(issue)
     return grouped
 
 
@@ -328,7 +262,7 @@ def _render_heading_issue_badge(issue: dict) -> str:
 
 
 def _issue_label(issue: dict) -> str:
-    labels = {
+    return {
         "missing_h1":      "H1 em falta",
         "multiple_h1":     "H1 múltiplo",
         "empty_h1":        "H1 vazio",
@@ -336,5 +270,4 @@ def _issue_label(issue: dict) -> str:
         "hierarchy_skip":  "Salto",
         "starts_too_deep": "Início profundo",
         "page_error":      "Erro de página",
-    }
-    return labels.get(issue.get("rule"), issue.get("rule") or "?")
+    }.get(issue.get("rule"), issue.get("rule") or "?")

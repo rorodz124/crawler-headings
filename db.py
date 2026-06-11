@@ -6,22 +6,25 @@ from datetime import datetime
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
-DADOS_DIR = BASE_DIR / "dados"
-DB_PATH = DADOS_DIR / "headings.db"
+DATA_DIR = BASE_DIR / "dados"
+DB_PATH = DATA_DIR / "headings.db"
 
 _lock = threading.Lock()
 
-def _agora():
+
+def _now() -> str:
     return datetime.utcnow().isoformat() + "Z"
 
-def _ligar():
-    DADOS_DIR.mkdir(parents=True, exist_ok=True)
+
+def _connect():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
-def inicializar():
-    with _lock, _ligar() as conn:
+
+def initialize():
+    with _lock, _connect() as conn:
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS runs (
@@ -64,27 +67,22 @@ def inicializar():
             """
         )
 
-# ---------------------------------------------------------------------------
-# Guardar um run completo
-# ---------------------------------------------------------------------------
-def guardar_run(tipo, url, resultado, iniciado_em=None):
-    """
-    Recebe o dict devolvido por crawl_site / _run_audit e persiste-o.
-    Devolve o run_id gerado.
-    """
-    run_id      = uuid.uuid4().hex
-    iniciado    = iniciado_em or _agora()
-    terminado   = _agora()
-    reports     = resultado.get("reports") or []
-    timings     = resultado.get("timings") or {}
 
-    total_paginas     = resultado.get("pages_crawled") or len(reports)
-    paginas_com_erros = resultado.get("pages_with_issues") or 0
-    paginas_ok        = total_paginas - paginas_com_erros
-    total_issues      = sum(len(r.get("issues") or []) for r in reports)
-    tempo_total_s     = timings.get("total_elapsed_seconds") or 0.0
+def save_run(run_type: str, url: str, result: dict, started_at: str = None) -> str:
+    # Persists a completed crawl_site result and returns the generated run_id.
+    run_id    = uuid.uuid4().hex
+    started   = started_at or _now()
+    finished  = _now()
+    reports   = result.get("reports") or []
+    timings   = result.get("timings") or {}
 
-    with _lock, _ligar() as conn:
+    total_pages        = result.get("pages_crawled") or len(reports)
+    pages_with_issues  = result.get("pages_with_issues") or 0
+    pages_ok           = total_pages - pages_with_issues
+    total_issues       = sum(len(r.get("issues") or []) for r in reports)
+    elapsed_s          = timings.get("total_elapsed_seconds") or 0.0
+
+    with _lock, _connect() as conn:
         conn.execute(
             """
             INSERT INTO runs (
@@ -94,9 +92,9 @@ def guardar_run(tipo, url, resultado, iniciado_em=None):
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                run_id, tipo, url, iniciado, terminado,
-                total_paginas, paginas_com_erros, paginas_ok,
-                total_issues, round(tempo_total_s, 3),
+                run_id, run_type, url, started, finished,
+                total_pages, pages_with_issues, pages_ok,
+                total_issues, round(elapsed_s, 3),
             ),
         )
 
@@ -124,7 +122,7 @@ def guardar_run(tipo, url, resultado, iniciado_em=None):
                     json.dumps(headings, ensure_ascii=False),
                 ),
             )
-            pagina_id = cur.lastrowid
+            page_id = cur.lastrowid
 
             for issue in (report.get("issues") or []):
                 conn.execute(
@@ -134,7 +132,7 @@ def guardar_run(tipo, url, resultado, iniciado_em=None):
                     """,
                     (
                         run_id,
-                        pagina_id,
+                        page_id,
                         issue.get("rule") or "",
                         issue.get("message") or "",
                         issue.get("heading_index"),
@@ -143,12 +141,10 @@ def guardar_run(tipo, url, resultado, iniciado_em=None):
 
     return run_id
 
-# ---------------------------------------------------------------------------
-# Listar histórico
-# ---------------------------------------------------------------------------
-def listar_runs(limite=100):
-    """Devolve lista de runs ordenada da mais recente para a mais antiga."""
-    with _lock, _ligar() as conn:
+
+def list_runs(limit: int = 100) -> list[dict]:
+    # Returns runs ordered from newest to oldest.
+    with _lock, _connect() as conn:
         rows = conn.execute(
             """
             SELECT id, tipo, url, iniciado_em, terminado_em,
@@ -158,23 +154,21 @@ def listar_runs(limite=100):
             ORDER BY iniciado_em DESC
             LIMIT ?
             """,
-            (limite,),
+            (limit,),
         ).fetchall()
     return [dict(r) for r in rows]
 
-# ---------------------------------------------------------------------------
-# Obter detalhe de um run
-# ---------------------------------------------------------------------------
-def obter_run(run_id):
-    """Devolve o run + todas as páginas com os seus issues."""
-    with _lock, _ligar() as conn:
+
+def get_run(run_id: str) -> dict | None:
+    # Returns the full run with all pages and their issues.
+    with _lock, _connect() as conn:
         run_row = conn.execute(
             "SELECT * FROM runs WHERE id = ?", (run_id,)
         ).fetchone()
         if not run_row:
             return None
 
-        paginas_rows = conn.execute(
+        page_rows = conn.execute(
             """
             SELECT id, url, titulo, valida,
                    total_headings, considered_headings, h1_count, issue_count,
@@ -184,40 +178,38 @@ def obter_run(run_id):
             (run_id,),
         ).fetchall()
 
-        paginas = []
-        for p in paginas_rows:
-            issues_rows = conn.execute(
+        pages = []
+        for p in page_rows:
+            issue_rows = conn.execute(
                 "SELECT rule, message, heading_index FROM issues WHERE pagina_id = ?",
                 (p["id"],),
             ).fetchall()
-            paginas.append({
+            pages.append({
                 **dict(p),
                 "headings": json.loads(p["headings_json"] or "[]"),
-                "issues":   [dict(i) for i in issues_rows],
+                "issues":   [dict(i) for i in issue_rows],
             })
 
-    return {**dict(run_row), "paginas": paginas}
+    return {**dict(run_row), "paginas": pages}
 
-# ---------------------------------------------------------------------------
-# Apagar
-# ---------------------------------------------------------------------------
-def apagar_run(run_id):
-    """Apaga um run e todos os dados associados."""
-    with _lock, _ligar() as conn:
-        paginas = conn.execute(
+
+def delete_run(run_id: str) -> None:
+    # Deletes a single run and all associated data.
+    with _lock, _connect() as conn:
+        page_ids = conn.execute(
             "SELECT id FROM paginas WHERE run_id = ?", (run_id,)
         ).fetchall()
-        for p in paginas:
+        for p in page_ids:
             conn.execute("DELETE FROM issues WHERE pagina_id = ?", (p["id"],))
         conn.execute("DELETE FROM paginas WHERE run_id = ?", (run_id,))
         conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
 
 
-def apagar_todos_runs():
-    """Apaga todo o histórico."""
-    with _lock, _ligar() as conn:
+def delete_all_runs() -> None:
+    with _lock, _connect() as conn:
         conn.execute("DELETE FROM issues")
         conn.execute("DELETE FROM paginas")
         conn.execute("DELETE FROM runs")
 
-inicializar()
+
+initialize()

@@ -11,8 +11,7 @@ from playwright.sync_api import sync_playwright
 from config import AuditConfig, CrawlConfig
 from heading_extractor import extract_headings
 from heading_rules import validate_headings
-from url_utils import ( fetch_sitemap_urls, is_pagination, is_same_domain,
-    normalize_url, should_skip, url_key,)
+from url_utils import fetch_sitemap_urls, is_pagination, is_same_domain, normalize_url, should_skip, url_key
 
 _EXTRACT_LINKS_JS = """
 () => {
@@ -27,6 +26,7 @@ _EXTRACT_LINKS_JS = """
   return Array.from(s);
 }
 """
+
 
 @contextmanager
 def _browser():
@@ -108,18 +108,18 @@ def crawl_site(
     should_cancel = should_cancel or (lambda: False)
     has_limit = crawl_config.max_pages > 0
 
-    visited:    set[str]   = set()
-    in_progress: set[str]  = set()
-    known_keys: set[str]   = {url_key(base_url)}
-    queue:      deque[str] = deque([base_url])
-    reports:    list[dict] = []
+    visited:     set[str]   = set()
+    in_progress: set[str]   = set()
+    known_keys:  set[str]   = {url_key(base_url)}
+    queue:       deque[str] = deque([base_url])
+    reports:     list[dict] = []
 
     state_lock   = threading.Condition()
     reports_lock = threading.Lock()
     timing_lock  = threading.Lock()
     totals = {"load": 0.0, "headings": 0.0, "links": 0.0, "validation": 0.0, "page_total": 0.0}
 
-    # Fase 0 — sitemap (pré-crawl, browser dedicado)
+    # Phase 0 — pre-crawl sitemap with a dedicated browser
     if crawl_config.max_pages != 1:
         try:
             with _browser() as b:
@@ -153,10 +153,10 @@ def crawl_site(
                     return None
                 state_lock.wait(timeout=0.3)
 
-    def release(key: str, visited_flag: bool = True) -> None:
+    def release(key: str, mark_visited: bool = True) -> None:
         with state_lock:
             in_progress.discard(key)
-            if visited_flag:
+            if mark_visited:
                 visited.add(key)
             state_lock.notify_all()
 
@@ -270,8 +270,10 @@ def crawl_site(
                 page.context.close()
 
     threads = [threading.Thread(target=worker, daemon=True) for _ in range(crawl_config.crawler_workers)]
-    for t in threads: t.start()
-    for t in threads: t.join()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
 
     elapsed = time.perf_counter() - crawl_start
     n = len(reports)
