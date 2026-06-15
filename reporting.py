@@ -6,13 +6,11 @@ from html import escape
 from datetime import datetime, timezone
 from pathlib import Path
 
-
 def make_report_basename(result: dict) -> str:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     base_url = result.get("base_url") or "auditoria"
     slug = re.sub(r"[^a-zA-Z0-9]+", "_", base_url).strip("_").lower()[:70] or "auditoria"
     return f"relatorio_headings_{slug}_{timestamp}"
-
 
 def write_json_report(result: dict, report_dir: str, basename: str | None = None) -> Path:
     dest = Path(report_dir)
@@ -29,9 +27,7 @@ def write_html_report(result: dict, report_dir: str, basename: str | None = None
     output_path.write_text(_render_html_report(result), encoding="utf-8")
     return output_path
 
-
 def _render_html_report(result: dict) -> str:
-    generated_at = datetime.now(timezone.utc).strftime("%d/%m/%Y às %H:%M")
     reports = result.get("reports") or []
     pages_crawled = result.get("pages_crawled") or len(reports)
     pages_with_issues = result.get("pages_with_issues") or 0
@@ -118,7 +114,6 @@ def _render_html_report(result: dict) -> str:
   <main>
     <div class="report-header">
       <h1>Relatorio de auditoria de headings</h1>
-      <div class="meta">Gerado em {escape(generated_at)}</div>
       <div class="base-url"><a href="{escape(result.get("base_url") or "")}">{escape(result.get("base_url") or "")}</a></div>
     </div>
 
@@ -127,10 +122,6 @@ def _render_html_report(result: dict) -> str:
       <div class="s-card"><div class="s-num red">{pages_with_issues}</div><div class="s-label">Com erros</div></div>
       <div class="s-card"><div class="s-num green">{pages_ok}</div><div class="s-label">Sem erros</div></div>
       <div class="s-card"><div class="s-num">{total_issues}</div><div class="s-label">Problemas totais</div></div>
-    </div>
-
-    <div class="timings-bar">
-      Tempo total: {escape(str(elapsed))}s &nbsp;-&nbsp; Media por pagina: {escape(str(avg))}s
     </div>
 
     <div class="pages-header">
@@ -184,7 +175,6 @@ def _render_html_report(result: dict) -> str:
 </html>
 """
 
-
 def _render_page(report: dict) -> str:
     issues = report.get("issues") or []
     headings = report.get("considered_headings") or []
@@ -217,12 +207,10 @@ def _render_page(report: dict) -> str:
       </div>
     """
 
-
 def _render_issue(issue: dict) -> str:
     rule = _issue_label(issue)
     issue_class = "issue-label warn" if issue.get("rule") in {"hierarchy_skip", "starts_too_deep"} else "issue-label"
     return f'<div class="issue"><span class="{issue_class}">{escape(rule)}</span><span>{escape(issue.get("message") or "")}</span></div>'
-
 
 def _render_heading(heading: dict, issues_by_heading: dict[int, list[dict]]) -> str:
     level = int(heading.get("level") or 1)
@@ -231,7 +219,7 @@ def _render_heading(heading: dict, issues_by_heading: dict[int, list[dict]]) -> 
     if heading.get("hasImage") and not text:
         text = f'{heading.get("tag")} com imagem'
     elif not text:
-        text = "(heading vazio)"
+        text = "heading vazio (tem imagem ou logo)"
     heading_issues = issues_by_heading.get(heading.get("index"), [])
     issue_badges = "".join(_render_heading_issue_badge(i) for i in heading_issues)
     issues_html = f'<div class="h-issues">{issue_badges}</div>' if issue_badges else ""
@@ -246,7 +234,6 @@ def _render_heading(heading: dict, issues_by_heading: dict[int, list[dict]]) -> 
         f'</div>'
     )
 
-
 def _issues_by_heading(issues: list[dict]) -> dict[int, list[dict]]:
     grouped: dict[int, list[dict]] = {}
     for issue in issues:
@@ -255,11 +242,9 @@ def _issues_by_heading(issues: list[dict]) -> dict[int, list[dict]]:
             grouped.setdefault(idx, []).append(issue)
     return grouped
 
-
 def _render_heading_issue_badge(issue: dict) -> str:
     klass = "h-issue-badge warn" if issue.get("rule") in {"hierarchy_skip", "starts_too_deep"} else "h-issue-badge"
     return f'<span class="{klass}">{escape(_issue_label(issue))}</span>'
-
 
 def _issue_label(issue: dict) -> str:
     return {

@@ -43,7 +43,6 @@ def normalize_url(url: str) -> str:
 
 
 def url_key(url: str) -> str:
-    # Deduplication key: normalised URL without www.
     p = urlparse(normalize_url(url))
     return urlunparse(p._replace(netloc=canonical_host(p.netloc)))
 
@@ -71,13 +70,10 @@ def should_skip(url: str) -> bool:
         return True
     return False
 
-
 def is_pagination(url: str) -> bool:
     return any(pat.search(url) for pat in PAGINATION_PATTERNS)
 
-
 def fetch_sitemap_urls(base_url: str, page, crawl_config: CrawlConfig) -> list[str]:
-    # Tries /sitemap.xml and follows sitemap index links (up to 10 children).
     parsed = urlparse(base_url)
     sitemap_url = f"{parsed.scheme}://{parsed.netloc}/sitemap.xml"
     base_host = parsed.netloc
@@ -99,7 +95,6 @@ def fetch_sitemap_urls(base_url: str, page, crawl_config: CrawlConfig) -> list[s
 
         locs = _parse_urlset(page.content())
         if any(u.endswith(".xml") for u in locs):
-            # Sitemap index — locs point to child sitemaps
             for child in locs[:10]:
                 try:
                     r2 = page.goto(child, timeout=crawl_config.timeout_ms, wait_until="domcontentloaded")

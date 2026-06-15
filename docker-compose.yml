@@ -1,0 +1,10 @@
+services:
+  crawler:
+    build: .
+    container_name: crawler_headings
+    ports:
+      - "5001:5001"
+    volumes:
+      - ./dados:/app/dados
+      - ./relatorios_headings:/app/relatorios_headings
+    restart: unless-stopped

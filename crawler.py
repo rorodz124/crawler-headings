@@ -27,7 +27,6 @@ _EXTRACT_LINKS_JS = """
 }
 """
 
-
 @contextmanager
 def _browser():
     with sync_playwright() as pw:
@@ -36,7 +35,6 @@ def _browser():
             yield b
         finally:
             b.close()
-
 
 def _new_page(browser, cfg: CrawlConfig):
     ctx = browser.new_context(user_agent=cfg.user_agent, viewport={"width": 1280, "height": 800})
@@ -108,18 +106,18 @@ def crawl_site(
     should_cancel = should_cancel or (lambda: False)
     has_limit = crawl_config.max_pages > 0
 
-    visited:     set[str]   = set()
-    in_progress: set[str]   = set()
-    known_keys:  set[str]   = {url_key(base_url)}
-    queue:       deque[str] = deque([base_url])
-    reports:     list[dict] = []
+    visited: set[str] = set()
+    in_progress: set[str] = set()
+    known_keys: set[str] = {url_key(base_url)}
+    queue: deque[str] = deque([base_url])
+    reports: list[dict] = []
 
-    state_lock   = threading.Condition()
+    state_lock = threading.Condition()
     reports_lock = threading.Lock()
     timing_lock  = threading.Lock()
     totals = {"load": 0.0, "headings": 0.0, "links": 0.0, "validation": 0.0, "page_total": 0.0}
 
-    # Phase 0 — pre-crawl sitemap with a dedicated browser
+
     if crawl_config.max_pages != 1:
         try:
             with _browser() as b:
@@ -279,17 +277,17 @@ def crawl_site(
     n = len(reports)
     reports.sort(key=lambda r: r["url"])
     return {
-        "base_url":          base_url,
-        "pages_crawled":     n,
+        "base_url": base_url,
+        "pages_crawled": n,
         "pages_with_issues": sum(1 for r in reports if not r["valid"]),
         "timings": {
-            "total_elapsed_seconds":       round(elapsed, 4),
-            "average_page_seconds":        round(totals["page_total"] / n if n else 0, 4),
-            "pages_per_second":            round(n / elapsed if elapsed else 0, 4),
-            "load_seconds":                round(totals["load"], 4),
-            "headings_seconds":            round(totals["headings"], 4),
-            "validation_seconds":          round(totals["validation"], 4),
-            "links_seconds":               round(totals["links"], 4),
+            "total_elapsed_seconds": round(elapsed, 4),
+            "average_page_seconds": round(totals["page_total"] / n if n else 0, 4),
+            "pages_per_second": round(n / elapsed if elapsed else 0, 4),
+            "load_seconds": round(totals["load"], 4),
+            "headings_seconds": round(totals["headings"], 4),
+            "validation_seconds": round(totals["validation"], 4),
+            "links_seconds": round(totals["links"], 4),
             "measured_page_total_seconds": round(totals["page_total"], 4),
         },
         "reports": reports,

@@ -1,14 +1,11 @@
 from __future__ import annotations
 from config import AuditConfig
 
-
 def _has_content(h: dict) -> bool:
     return bool((h.get("text") or "").strip()) or bool(h.get("hasImage"))
 
-
 def _is_empty(h: dict) -> bool:
     return not _has_content(h)
-
 
 def validate_headings(page_data: dict, audit_config: AuditConfig) -> dict:
     raw = page_data.get("headings", [])
@@ -17,41 +14,41 @@ def validate_headings(page_data: dict, audit_config: AuditConfig) -> dict:
     for i, h in enumerate(raw, start=1):
         text = " ".join((h.get("text") or "").split())
         headings.append({
-            "index":     i,
-            "tag":       h["tag"],
-            "level":     h["level"],
-            "text":      text,
-            "hasImage":  h.get("hasImage", False),
+            "index": i,
+            "tag": h["tag"],
+            "level": h["level"],
+            "text": text,
+            "hasImage": h.get("hasImage", False),
             "imageType": h.get("imageType"),
-            "imageAlt":  h.get("imageAlt", ""),
-            "visible":   h.get("visible", False),
+            "imageAlt": h.get("imageAlt", ""),
+            "visible": h.get("visible", False),
             "is_empty":  _is_empty({"text": text, "hasImage": h.get("hasImage", False)}),
         })
 
     considered = [h for h in headings if h["visible"] or not audit_config.validate_visible_only]
     issues = []
 
-    # Rule — single h1
+    # single h1
     h1s = [h for h in considered if h["level"] == 1]
     h1_count = len(h1s)
 
     if h1_count == 0:
-        issues.append({"rule": "missing_h1", "message": "A página não tem h1. Cada página deve ter exactamente um h1 que descreva o seu conteúdo."})
+        issues.append({"rule": "missing_h1", "message": "A página não tem h1. Cada página deve ter um h1"})
     elif h1_count > 1:
         labels = ", ".join(f'"{h["text"]}"' if h["text"] else "(sem texto)" for h in h1s)
-        issues.append({"rule": "multiple_h1", "message": f"A página tem {h1_count} elementos h1 — deve existir apenas um. Encontrados: {labels}."})
+        issues.append({"rule": "multiple_h1", "message": f"A página tem {h1_count} elementos h1 — deve existir apenas um."})
 
     for h in h1s:
         if _is_empty(h):
             issues.append({"rule": "empty_h1", "message": "h1 vazio — não tem texto nem imagem. O h1 deve identificar o conteúdo da página.", "heading_index": h["index"]})
 
-    # Rule — heading hierarchy
+    # heading hierarchy
     prev_level: int | None = None
     for h in considered:
         level, tag = h["level"], h["tag"]
 
         if _is_empty(h) and level != 1:
-            issues.append({"rule": "empty_heading", "message": f"{tag} vazio — o heading não tem texto nem imagem.", "heading_index": h["index"]})
+            issues.append({"rule": "empty_heading", "message": f"{tag} vazio — o heading não tem texto.", "heading_index": h["index"]})
 
         if prev_level is None:
             if level > 1:

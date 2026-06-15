@@ -15,14 +15,14 @@ from config import AuditConfig, CrawlConfig
 from crawler import crawl_site
 from reporting import make_report_basename, write_html_report, write_json_report
 
-BASE_DIR    = Path(__file__).resolve().parent
-UI_FILE     = BASE_DIR / "headings_app.html"
-JS_FILE     = BASE_DIR / "headings_app.js"
+BASE_DIR = Path(__file__).resolve().parent
+UI_FILE = BASE_DIR / "headings_app.html"
+JS_FILE = BASE_DIR / "headings_app.js"
 REPORTS_DIR = BASE_DIR / "relatorios_headings"
 
 MAX_JOBS = 20
 MAX_LOGS = 120
-WORKERS  = 6
+WORKERS = 6
 
 app = Flask(__name__)
 CORS(app)
@@ -98,9 +98,9 @@ class JobManager:
             j["cancel_requested"] = True
             j["logs"].append("Cancelamento pedido pelo utilizador.")
             if j["state"] == "pendente":
-                j["state"]       = "cancelada"
+                j["state"] = "cancelada"
                 j["finished_at"] = datetime.utcnow().isoformat() + "Z"
-                j["progress"]    = {**j["progress"], "phase": "cancelada", "message": "Tarefa cancelada antes de arrancar."}
+                j["progress"] = {**j["progress"], "phase": "cancelada", "message": "Tarefa cancelada antes de arrancar."}
             return self._snapshot(j)
 
     def _mark_running(self, job_id: str) -> bool:
@@ -108,7 +108,7 @@ class JobManager:
             j = self._jobs[job_id]
             if j["cancel_requested"] or j["state"] == "cancelada":
                 return False
-            j["state"]      = "a_correr"
+            j["state"] = "a_correr"
             j["started_at"] = datetime.utcnow().isoformat() + "Z"
             j["logs"].append("Tarefa iniciada.")
             return True
@@ -134,26 +134,24 @@ class JobManager:
     def mark_done(self, job_id: str, result: dict, run_id: str = None) -> None:
         with self._lock:
             j = self._jobs[job_id]
-            j["state"]       = "concluida"
+            j["state"] = "concluida"
             j["finished_at"] = datetime.utcnow().isoformat() + "Z"
-            j["result"]      = result
-            j["run_id"]      = run_id
-            j["progress"]    = {**j["progress"], "phase": "concluida", "message": "Auditoria concluída.", "percentage": 100}
+            j["result"] = result
+            j["run_id"] = run_id
+            j["progress"] = {**j["progress"], "phase": "concluida", "message": "Auditoria concluída.", "percentage": 100}
             j["logs"].append("Auditoria concluída.")
 
     def mark_failed(self, job_id: str, error: str) -> None:
         with self._lock:
             j = self._jobs[job_id]
-            state            = "cancelada" if j["cancel_requested"] else "erro"
-            j["state"]       = state
+            state = "cancelada" if j["cancel_requested"] else "erro"
+            j["state"] = state
             j["finished_at"] = datetime.utcnow().isoformat() + "Z"
-            j["error"]       = error
-            j["progress"]    = {**j["progress"], "phase": state, "message": error}
+            j["error"] = error
+            j["progress"] = {**j["progress"], "phase": state, "message": error}
             j["logs"].append(error)
 
-
 job_manager = JobManager()
-
 
 def _error_response(msg: str, status: int = 400):
     return jsonify({"error": msg}), status
@@ -173,14 +171,12 @@ def _validate_url(url: str) -> str | None:
         return "A URL não parece válida. Verifica o endereço introduzido."
     return None
 
-
 def _resolve_report_path(name: str) -> Path:
     base   = REPORTS_DIR.resolve()
     target = (REPORTS_DIR / name).resolve()
     if not str(target).startswith(str(base) + os.sep) or target.suffix.lower() != ".html":
         abort(404)
     return target
-
 
 def _launch_job(job_type: str, title: str, runner) -> dict:
     job    = job_manager.create(job_type, title)
@@ -235,13 +231,11 @@ def _launch_job(job_type: str, title: str, runner) -> dict:
     threading.Thread(target=work, daemon=True).start()
     return job
 
-
 def _job_response(factory):
     try:
         return jsonify(factory()), 202
     except ValueError as exc:
         return _error_response(str(exc), 400)
-
 
 def _run_audit(run_type: str, url: str, max_pages: int, on_progress, should_cancel):
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -273,23 +267,13 @@ def _run_audit(run_type: str, url: str, max_pages: int, on_progress, should_canc
     return result, run_id
 
 
-# ---------------------------------------------------------------------------
-# Static files
-# ---------------------------------------------------------------------------
-
 @app.get("/")
 def index():
     return send_file(UI_FILE)
 
-
 @app.get("/headings_app.js")
 def serve_js():
     return send_file(JS_FILE, mimetype="application/javascript; charset=utf-8")
-
-
-# ---------------------------------------------------------------------------
-# HTML report file endpoints
-# ---------------------------------------------------------------------------
 
 @app.get("/relatorios/<path:name>")
 def open_report(name):
@@ -297,7 +281,6 @@ def open_report(name):
     if not target.is_file():
         abort(404)
     return send_file(target)
-
 
 @app.get("/api/relatorios")
 def list_reports():
@@ -315,7 +298,6 @@ def list_reports():
         except OSError:
             pass
     return jsonify({"reports": items})
-
 
 @app.delete("/api/relatorios")
 def delete_all_reports():
@@ -351,6 +333,7 @@ def rename_report(name):
     if not new_name or new_name == ".html":
         return _error_response("Nome inválido.")
     dest = REPORTS_DIR / new_name
+    
     if dest.exists() and dest.resolve() != target.resolve():
         return _error_response("Já existe um relatório com esse nome.", 409)
     json_pair = target.with_suffix(".json")
@@ -359,7 +342,6 @@ def rename_report(name):
     if json_pair.is_file() and not json_dest.exists():
         json_pair.rename(json_dest)
     return jsonify({"name": new_name, "url": f"/relatorios/{new_name}"})
-
 
 @app.delete("/api/relatorios/<path:name>")
 def delete_report(name):
@@ -371,11 +353,6 @@ def delete_report(name):
     if json_pair.is_file():
         json_pair.unlink()
     return jsonify({"deleted": name})
-
-
-# ---------------------------------------------------------------------------
-# History (DB) endpoints
-# ---------------------------------------------------------------------------
 
 @app.get("/api/historico")
 def list_history():
@@ -393,7 +370,6 @@ def get_history(run_id):
         return _error_response("Run não encontrada.", 404)
     return jsonify(run)
 
-
 @app.delete("/api/historico/<run_id>")
 def delete_history(run_id):
     if not db.get_run(run_id):
@@ -401,26 +377,19 @@ def delete_history(run_id):
     db.delete_run(run_id)
     return jsonify({"deleted": run_id})
 
-
 @app.delete("/api/historico")
 def delete_all_history():
     db.delete_all_runs()
     return jsonify({"deleted": "all"})
 
 
-# ---------------------------------------------------------------------------
-# Health and job endpoints
-# ---------------------------------------------------------------------------
-
 @app.get("/api/health")
 def health():
     return jsonify({"ok": True})
 
-
 @app.get("/api/jobs")
 def list_jobs():
     return jsonify({"jobs": job_manager.list_all()})
-
 
 @app.get("/api/jobs/<job_id>")
 def get_job(job_id):
@@ -429,13 +398,11 @@ def get_job(job_id):
         return _error_response("Tarefa não encontrada.", 404)
     return jsonify(job)
 
-
 @app.delete("/api/jobs/<job_id>")
 def delete_job(job_id):
     if not job_manager.delete(job_id):
         return _error_response("Tarefa não encontrada.", 404)
     return jsonify({"deleted": job_id})
-
 
 @app.post("/api/jobs/<job_id>/cancel")
 def cancel_job(job_id):
@@ -445,15 +412,11 @@ def cancel_job(job_id):
     return jsonify(job)
 
 
-# ---------------------------------------------------------------------------
-# Audit job creation endpoints
-# ---------------------------------------------------------------------------
-
 @app.post("/api/jobs/headings/pagina")
 def create_page_job():
     data = request.get_json(silent=True) or {}
-    url  = (data.get("url") or "").strip()
-    err  = _validate_url(url)
+    url = (data.get("url") or "").strip()
+    err = _validate_url(url)
     if err:
         return _error_response(err)
     return _job_response(lambda: _launch_job(
@@ -461,11 +424,10 @@ def create_page_job():
         lambda p, sc: _run_audit("pagina", url, max_pages=1, on_progress=p, should_cancel=sc),
     ))
 
-
 @app.post("/api/jobs/headings/site")
 def create_site_job():
-    data      = request.get_json(silent=True) or {}
-    url       = (data.get("url") or "").strip()
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
     max_pages = int(data.get("max_paginas") or 0)
     err = _validate_url(url)
     if err:
@@ -475,8 +437,7 @@ def create_site_job():
         lambda p, sc: _run_audit("site", url, max_pages=max_pages, on_progress=p, should_cancel=sc),
     ))
 
-
 if __name__ == "__main__":
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     print("[headings] Running at http://localhost:5001")
-    app.run(debug=False, port=5001, threaded=True)
+    app.run(debug=False, host="0.0.0.0", port=5001, threaded=True)

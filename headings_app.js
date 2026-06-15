@@ -3,18 +3,18 @@
 
 const API_BASE = window.location.protocol === "file:" ? "http://localhost:5001" : "";
 
-const toastEl          = document.getElementById("toast");
-const jobsListEl       = document.getElementById("jobsList");
-const reportsListEl    = document.getElementById("reportsList");
-const modeToggle       = document.getElementById("modeToggle");
-const urlInput         = document.getElementById("urlInput");
-const urlLabel         = document.getElementById("urlLabel");
-const limitField       = document.getElementById("limitField");
-const maxPagesInput    = document.getElementById("maxPaginas");
-const submitBtn        = document.getElementById("submitBtn");
-const clearBtn         = document.getElementById("clearBtn");
-const reportsRefreshBtn    = document.getElementById("reportsRefreshBtn");
-const reportsDeleteAllBtn  = document.getElementById("reportsDeleteAllBtn");
+const toastEl = document.getElementById("toast");
+const jobsListEl = document.getElementById("jobsList");
+const reportsListEl = document.getElementById("reportsList");
+const modeToggle = document.getElementById("modeToggle");
+const urlInput = document.getElementById("urlInput");
+const urlLabel = document.getElementById("urlLabel");
+const limitField = document.getElementById("limitField");
+const maxPagesInput = document.getElementById("maxPaginas");
+const submitBtn = document.getElementById("submitBtn");
+const clearBtn = document.getElementById("clearBtn");
+const reportsRefreshBtn = document.getElementById("reportsRefreshBtn");
+const reportsDeleteAllBtn = document.getElementById("reportsDeleteAllBtn");
 
 let crawlMode = "single";
 let hiddenJobIds = new Set();
@@ -327,12 +327,7 @@ function renderJobs(allJobs) {
       const el = jobsListEl.querySelector(`[data-job-id="${CSS.escape(jid)}"]`);
       if (el) el.remove();
       if (!jobsListEl.querySelector(".job")) {
-        try {
-          const hist = await fetchJson("/api/historico?limite=20");
-          renderHistorico(hist.runs || []);
-        } catch (_) {
-          jobsListEl.innerHTML = `<div class="empty">Ainda não há auditorias.</div>`;
-        }
+        jobsListEl.innerHTML = `<div class="empty">Ainda não há auditorias.</div>`;
       }
     });
   });
@@ -492,7 +487,6 @@ function renderHistorico(runs) {
       run.terminado_em ? formatDate(run.terminado_em) : null,
       run.total_paginas != null ? `${run.total_paginas} página(s)` : null,
       run.paginas_com_erros ? `${run.paginas_com_erros} com problemas` : "sem problemas",
-      run.tempo_total_s != null ? `${Number(run.tempo_total_s).toFixed(1)}s` : null,
     ].filter(Boolean).join(" · ");
     return `<article class="job" data-hist-id="${esc(run.id)}">
         <div class="job-head">

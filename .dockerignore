@@ -1,0 +1,36 @@
+# ── Controlo de versão ───────────────────────────────────────────────────────
+.git
+.gitignore
+
+# ── Ambiente virtual Python ──────────────────────────────────────────────────
+# Não queremos copiar o venv local; o Docker instala as deps de raiz.
+venv/
+.venv/
+env/
+.env/
+
+# ── Dados e relatórios locais ────────────────────────────────────────────────
+# Estes serão geridos por volumes no docker-compose, não precisam de ir para a imagem.
+dados/
+relatorios_headings/
+
+# ── Cache e bytecode Python ──────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# ── Ficheiros de IDE e sistema ───────────────────────────────────────────────
+.vscode/
+.idea/
+.cursor/
+.DS_Store
+Thumbs.db
+
+# ── Ficheiros Docker (não precisam de estar dentro da imagem) ────────────────
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log

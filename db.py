@@ -11,17 +11,14 @@ DB_PATH = DATA_DIR / "headings.db"
 
 _lock = threading.Lock()
 
-
 def _now() -> str:
     return datetime.utcnow().isoformat() + "Z"
-
 
 def _connect():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
-
 
 def initialize():
     with _lock, _connect() as conn:
@@ -69,18 +66,17 @@ def initialize():
 
 
 def save_run(run_type: str, url: str, result: dict, started_at: str = None) -> str:
-    # Persists a completed crawl_site result and returns the generated run_id.
     run_id    = uuid.uuid4().hex
     started   = started_at or _now()
     finished  = _now()
     reports   = result.get("reports") or []
     timings   = result.get("timings") or {}
 
-    total_pages        = result.get("pages_crawled") or len(reports)
-    pages_with_issues  = result.get("pages_with_issues") or 0
-    pages_ok           = total_pages - pages_with_issues
-    total_issues       = sum(len(r.get("issues") or []) for r in reports)
-    elapsed_s          = timings.get("total_elapsed_seconds") or 0.0
+    total_pages = result.get("pages_crawled") or len(reports)
+    pages_with_issues = result.get("pages_with_issues") or 0
+    pages_ok = total_pages - pages_with_issues
+    total_issues = sum(len(r.get("issues") or []) for r in reports)
+    elapsed_s = timings.get("total_elapsed_seconds") or 0.0
 
     with _lock, _connect() as conn:
         conn.execute(
@@ -101,7 +97,6 @@ def save_run(run_type: str, url: str, result: dict, started_at: str = None) -> s
         for report in reports:
             summary  = report.get("summary") or {}
             headings = report.get("considered_headings") or []
-
             cur = conn.execute(
                 """
                 INSERT INTO paginas (
@@ -143,7 +138,6 @@ def save_run(run_type: str, url: str, result: dict, started_at: str = None) -> s
 
 
 def list_runs(limit: int = 100) -> list[dict]:
-    # Returns runs ordered from newest to oldest.
     with _lock, _connect() as conn:
         rows = conn.execute(
             """
@@ -160,7 +154,6 @@ def list_runs(limit: int = 100) -> list[dict]:
 
 
 def get_run(run_id: str) -> dict | None:
-    # Returns the full run with all pages and their issues.
     with _lock, _connect() as conn:
         run_row = conn.execute(
             "SELECT * FROM runs WHERE id = ?", (run_id,)
@@ -187,14 +180,13 @@ def get_run(run_id: str) -> dict | None:
             pages.append({
                 **dict(p),
                 "headings": json.loads(p["headings_json"] or "[]"),
-                "issues":   [dict(i) for i in issue_rows],
+                "issues": [dict(i) for i in issue_rows],
             })
 
     return {**dict(run_row), "paginas": pages}
 
 
 def delete_run(run_id: str) -> None:
-    # Deletes a single run and all associated data.
     with _lock, _connect() as conn:
         page_ids = conn.execute(
             "SELECT id FROM paginas WHERE run_id = ?", (run_id,)
@@ -204,12 +196,10 @@ def delete_run(run_id: str) -> None:
         conn.execute("DELETE FROM paginas WHERE run_id = ?", (run_id,))
         conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
 
-
 def delete_all_runs() -> None:
     with _lock, _connect() as conn:
         conn.execute("DELETE FROM issues")
         conn.execute("DELETE FROM paginas")
         conn.execute("DELETE FROM runs")
-
 
 initialize()

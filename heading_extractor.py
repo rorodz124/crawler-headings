@@ -79,6 +79,5 @@ EXTRACT_HEADINGS_SCRIPT = r"""
 }
 """
 
-
 def extract_headings(page) -> dict:
     return page.evaluate(EXTRACT_HEADINGS_SCRIPT)
